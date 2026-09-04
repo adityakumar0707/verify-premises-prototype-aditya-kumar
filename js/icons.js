@@ -22,6 +22,7 @@ export const ICONS = {
   bank: svg('<path d="M3 10 12 4l9 6"/><path d="M5 10v9M9 10v9M15 10v9M19 10v9"/><path d="M3 21h18"/>'),
   phone: svg('<rect x="7" y="2" width="10" height="20" rx="2.5"/><line x1="11" y1="18" x2="13" y2="18" stroke-width="2.4"/>'),
   headset: svg('<path d="M4 13a8 8 0 0 1 16 0"/><rect x="3" y="13" width="4" height="6" rx="1.5"/><rect x="17" y="13" width="4" height="6" rx="1.5"/><path d="M20 19v1a3 3 0 0 1-3 3h-3"/>'),
+  idcard: svg('<rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="8.5" cy="11" r="2"/><path d="M6 16.5c0-1.4 1.1-2.5 2.5-2.5S11 15.1 11 16.5"/><line x1="13.5" y1="9.5" x2="18" y2="9.5"/><line x1="13.5" y1="13" x2="18" y2="13"/>'),
 };
 
 export const icon = (name, cls = '') => `<span class="${cls}">${ICONS[name] || ''}</span>`;
