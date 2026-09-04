@@ -33,7 +33,24 @@ mocked, since this is a design prototype, not a wired-up backend.
 - `js/mock-data.js` — four demo scenarios (thick-file, thin-file,
   conflicting-records, spoofed-capture) standing in for real source calls.
 - `js/app.js` — screens, state, and the real browser API integrations.
+  Deliberately translates engine output into plain language before it ever
+  reaches the screen — no lane names, match percentages, or internal terms
+  in customer-facing copy; a "What we checked" disclosure gives the same
+  information in one sentence per source instead.
+- `js/icons.js` — small hand-drawn icon set (no external icon library).
 - `css/styles.css`, `index.html` — presentation shell.
+
+## UX choices worth noting
+
+- **Nothing is a dead end.** A decline always offers a real next step —
+  fix the address inline, retry the live check, or reach support — never
+  just "start over."
+- **Permission asks are primed.** Camera/location prompts are preceded by
+  a plain-language "why," not sprung on the user cold.
+- **The capture step gives live feedback** (simulated — no real CV in this
+  UI-only build) instead of a silent shutter button.
+- **Back navigation** is available anywhere it's safe to go back, so a
+  wrong tap doesn't cost a restart.
 
 ## Demo scenarios
 
