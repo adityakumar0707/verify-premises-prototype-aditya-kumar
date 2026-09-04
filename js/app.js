@@ -1,23 +1,20 @@
-import { DEMO_SCENARIOS, AADHAAR_TENURE_MONTHS, BUREAU_LATENCY_MS, SOURCE_CHECK_LATENCY_MS } from './mock-data.js';
-import { scoreCorroboration, routeFromCorroboration, routeFromCapture } from './engine.js';
+import { DEMO_SCENARIOS, BUREAU_LATENCY_MS } from './mock-data.js';
+import { routeFromCapture } from './engine.js';
 import { ICONS } from './icons.js';
 
 // ---- state -----------------------------------------------------------
 const state = {
   screen: 'welcome',
   history: [],
-  scenarioKey: 'thick_file',
-  mobile: '', otp: '', verifying: false, resendIn: 0, resendTimer: null,
-  personalEmail: '',
-  aadhaarNumber: '', aadhaarOtp: '', aadhaarVerifying: false,
+  scenarioKey: 'verified',
+  aadhaarNumber: '', aadhaarOtp: '', aadhaarVerifying: false, resendIn: 0, resendTimer: null,
+  setupType: null,
+  personalEmail: { value: '', otpSent: false, otp: '', verifying: false, verified: false },
+  workEmail: { value: '', otpSent: false, otp: '', verifying: false, verified: false },
   pan: '',
   currentSameAsPermanent: true, currentAddressDraft: '',
   editingPermanent: false, permanentAddressDraft: '', permanentAddressOverride: null,
-  setupType: null,
-  workEmail: '', checkingEmail: false,
-  corroboration: null, routeDecision: null,
-  capturing: false, geoLoading: false, geoConfirmed: false,
-  cameraReady: false,
+  geoLoading: false, geoConfirmed: false,
   captureVerdict: null, captureRouteDecision: null,
   traceOpen: false,
 };
@@ -30,7 +27,7 @@ const root = document.getElementById('screen-root');
 const topbarEl = document.getElementById('topbar');
 const phoneEl = document.querySelector('.phone');
 
-const TRANSIENT = new Set(['bureau-loading', 'checking', 'stepup-checking']);
+const TRANSIENT = new Set(['bureau-loading', 'checking', 'capture-checking']);
 
 function goto(screen, { replace = false } = {}) {
   if (!replace && state.screen !== screen) state.history.push(state.screen);
@@ -53,7 +50,7 @@ function showToast(message) {
   setTimeout(() => {
     el.classList.remove('show');
     setTimeout(() => el.remove(), 350);
-  }, 2000);
+  }, 2200);
 }
 
 // ---- demo panel (reviewer tool, not part of the customer product) ----
@@ -77,17 +74,15 @@ function resetFlow() {
   clearInterval(state.resendTimer);
   Object.assign(state, {
     screen: 'welcome', history: [],
-    mobile: '', otp: '', verifying: false, resendIn: 0, resendTimer: null,
-    personalEmail: '',
-    aadhaarNumber: '', aadhaarOtp: '', aadhaarVerifying: false,
+    aadhaarNumber: '', aadhaarOtp: '', aadhaarVerifying: false, resendIn: 0, resendTimer: null,
+    setupType: null,
+    personalEmail: { value: '', otpSent: false, otp: '', verifying: false, verified: false },
+    workEmail: { value: '', otpSent: false, otp: '', verifying: false, verified: false },
     pan: '',
     currentSameAsPermanent: scenario().currentSameAsPermanentDefault,
     currentAddressDraft: scenario().currentAddressSuggestion,
     editingPermanent: false, permanentAddressDraft: '', permanentAddressOverride: null,
-    setupType: null,
-    workEmail: '', checkingEmail: false,
-    corroboration: null, routeDecision: null,
-    capturing: false, geoLoading: false, geoConfirmed: false, cameraReady: false,
+    geoLoading: false, geoConfirmed: false,
     captureVerdict: null, captureRouteDecision: null, traceOpen: false,
   });
   render();
@@ -96,13 +91,14 @@ function resetFlow() {
 // ---- topbar (back + progress) ------------------------------------------
 const STAGE_OF = {
   welcome: 0,
-  mobile: 1, otp: 1, 'personal-email': 1, 'aadhaar-number': 1, 'aadhaar-otp': 1, pan: 1, 'bureau-loading': 1, profile: 1,
-  setup: 2, 'business-stub': 2, 'work-email': 2,
-  checking: 3, 'stepup-intro': 3, 'stepup-geo': 3, 'stepup-camera': 3, 'stepup-checking': 3,
-  'outcome-clear': 4, 'outcome-stepup-clear': 4, 'outcome-decline': 4, 'support-stub': 4,
+  'aadhaar-number': 1, 'aadhaar-otp': 1,
+  setup: 2, 'business-stub': 2,
+  'email-verify': 2, pan: 2, 'bureau-loading': 2, profile: 2,
+  'capture-intro': 3, 'capture-geo': 3, 'capture-camera': 3, 'capture-checking': 3,
+  'outcome-clear': 4, 'outcome-decline': 4, 'support-stub': 4,
 };
-const STAGE_LABELS = ['', 'Identity check', 'Setup', 'Verification', 'Done'];
-const NO_BACK = new Set(['welcome', 'bureau-loading', 'checking', 'stepup-checking', 'outcome-clear', 'outcome-stepup-clear', 'outcome-decline']);
+const STAGE_LABELS = ['', 'Identity check', 'Details', 'Verification', 'Done'];
+const NO_BACK = new Set(['welcome', 'bureau-loading', 'capture-checking', 'outcome-clear', 'outcome-decline']);
 
 function renderTopbar() {
   const stage = STAGE_OF[state.screen] ?? 0;
@@ -121,7 +117,9 @@ function renderTopbar() {
 }
 
 // ---- input helper: updates state + button state without wiping the
-// input's own DOM node, so focus and the mobile keyboard never drop. ----
+// input's own DOM node, so focus and the mobile keyboard never drop.
+// NOTHING that runs while a screen with a live input is mounted may call
+// render() outside of this pattern — see startResendTimer for why. ----
 function bindInput(id, { transform = (v) => v, onChange, buttonId, isValid }) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -140,6 +138,98 @@ function formatAadhaar(raw) {
   return digits.replace(/(\d{4})(?=\d)/g, '$1 ');
 }
 
+// Ticks a resend countdown by mutating the button directly. Deliberately
+// never calls render(): this runs on a 1s interval for as long as an OTP
+// screen is open, and a full re-render on that cadence was recreating the
+// OTP input mid-keystroke, which is why "type a digit, losing focus" kept
+// happening. Never call render() from a timer that can fire while an
+// input on screen might have focus.
+function startResendTimer(btnId) {
+  clearInterval(state.resendTimer);
+  state.resendIn = 30;
+  const tick = () => {
+    const btn = document.getElementById(btnId);
+    if (!btn) { clearInterval(state.resendTimer); return; }
+    if (state.resendIn <= 0) {
+      btn.textContent = 'Resend code';
+      btn.disabled = false;
+      btn.classList.remove('muted');
+      clearInterval(state.resendTimer);
+      return;
+    }
+    btn.textContent = `Resend code in 0:${String(state.resendIn).padStart(2, '0')}`;
+    btn.disabled = true;
+    btn.classList.add('muted');
+    state.resendIn--;
+  };
+  tick();
+  state.resendTimer = setInterval(tick, 1000);
+}
+
+// ---- reusable inline email verification block ---------------------------
+function emailBlock(key, label, placeholder) {
+  const e = state[key];
+  if (e.verified) {
+    return `
+      <div class="email-block">
+        <label>${label}</label>
+        <div class="email-verified-row">
+          <span class="ev-check">${ICONS.check}</span>
+          <span class="ev-value">${e.value}</span>
+          <span class="ev-tag">Verified</span>
+        </div>
+      </div>`;
+  }
+  if (e.otpSent) {
+    return `
+      <div class="email-block">
+        <label>${label}</label>
+        <input id="${key}-input" type="email" value="${e.value}" disabled>
+        <div class="otp-inline-row">
+          <input id="${key}-otp-input" class="otp-input-sm" type="text" inputmode="numeric" maxlength="6" placeholder="······" value="${e.otp}">
+          <button class="btn-sm-primary" id="${key}-verify-otp" ${e.otp.length === 6 ? '' : 'disabled'}>${e.verifying ? '<span class="spin"></span>' : 'Confirm'}</button>
+        </div>
+        <p class="field-hint">Code sent to ${e.value}. <span class="mono">(Demo, any 6 digits work)</span></p>
+      </div>`;
+  }
+  return `
+    <div class="email-block">
+      <label for="${key}-input">${label}</label>
+      <input id="${key}-input" type="email" placeholder="${placeholder}" value="${e.value}" autocomplete="off">
+      <button class="verify-link" id="${key}-send-otp" ${e.value.includes('@') ? '' : 'disabled'}>Verify</button>
+    </div>`;
+}
+
+function wireEmailBlock(key) {
+  const e = state[key];
+  if (e.verified) return;
+  if (!e.otpSent) {
+    bindInput(`${key}-input`, {
+      onChange: (v) => { state[key].value = v; },
+      buttonId: `${key}-send-otp`, isValid: (v) => v.includes('@'),
+    });
+    document.getElementById(`${key}-send-otp`)?.addEventListener('click', () => {
+      state[key].otpSent = true; render();
+    });
+  } else {
+    bindInput(`${key}-otp-input`, {
+      transform: (v) => v.replace(/\D/g, '').slice(0, 6),
+      onChange: (v) => { state[key].otp = v; if (v.length === 6) verifyEmailOtp(key); },
+      buttonId: `${key}-verify-otp`, isValid: (v) => v.length === 6,
+    });
+    document.getElementById(`${key}-verify-otp`)?.addEventListener('click', () => verifyEmailOtp(key));
+  }
+}
+async function verifyEmailOtp(key) {
+  if (state[key].otp.length !== 6) return;
+  state[key].verifying = true; render();
+  await sleep(400);
+  state[key].verifying = false;
+  state[key].verified = true;
+  render();
+  showToast(`${key === 'personalEmail' ? 'Personal' : 'Office'} email verified successfully`);
+}
+
 // ---- screens ------------------------------------------------------------
 const screens = {
   welcome() {
@@ -147,52 +237,17 @@ const screens = {
       <div class="center" style="margin:auto 0;">
         <div class="hero-icon">${ICONS.home}</div>
         <h1 class="screen-title">Let's verify where you live or work</h1>
-        <p class="screen-sub">Most people finish in under two minutes, right from your phone. No paperwork, no one visiting your door.</p>
+        <p class="screen-sub">Most people finish in a few minutes, right from your phone. No paperwork, no one visiting your door until the live check at the end.</p>
       </div>
-      <div class="btn-row"><button class="btn btn-primary" data-go="mobile">Get started</button></div>
-    `;
-  },
-
-  mobile() {
-    return `
-      <span class="eyebrow">${ICONS.phone} Mobile number</span>
-      <h1 class="screen-title">First, let's confirm it's you</h1>
-      <p class="screen-sub">We'll text a quick code to your phone.</p>
-      <label for="mobile-input">Mobile number</label>
-      <input id="mobile-input" type="tel" placeholder="98765 43210" value="${state.mobile}" maxlength="10" autocomplete="tel">
-      <div class="value-nudge">${ICONS.lock} Just to confirm it's really you. We won't call or spam you.</div>
-      <div class="btn-row"><button class="btn btn-primary" id="send-otp" ${state.mobile.length === 10 ? '' : 'disabled'}>Send code</button></div>
-    `;
-  },
-
-  otp() {
-    return `
-      <span class="eyebrow">${ICONS.phone} Verify code</span>
-      <h1 class="screen-title">Enter the code we sent</h1>
-      <p class="screen-sub">Sent to +91 ${state.mobile}. <span class="mono">(Demo, any 6 digits work)</span></p>
-      <input id="otp-input" class="otp-input" type="text" inputmode="numeric" maxlength="6" placeholder="······" value="${state.otp}" autocomplete="one-time-code">
-      <div class="btn-row">
-        <button class="btn btn-primary" id="verify-otp" ${state.otp.length === 6 ? '' : 'disabled'}>${state.verifying ? '<span class="spin"></span>' : 'Verify'}</button>
-        <button class="link-btn ${state.resendIn > 0 ? 'muted' : ''}" id="resend-otp" ${state.resendIn > 0 ? 'disabled' : ''}>${state.resendIn > 0 ? `Resend code in 0:${String(state.resendIn).padStart(2, '0')}` : 'Resend code'}</button>
-      </div>
-    `;
-  },
-
-  'personal-email'() {
-    return `
-      <span class="eyebrow">${ICONS.mail} Contact email</span>
-      <h1 class="screen-title">What's your email?</h1>
-      <p class="screen-sub">We'll use this for statements and account updates, nothing else.</p>
-      <input id="personal-email-input" type="email" placeholder="you@example.com" value="${state.personalEmail}">
-      <div class="btn-row"><button class="btn btn-primary" id="continue-email" ${state.personalEmail.includes('@') ? '' : 'disabled'}>Continue</button></div>
+      <div class="btn-row"><button class="btn btn-primary" data-go="aadhaar-number">Get started</button></div>
     `;
   },
 
   'aadhaar-number'() {
     return `
-      <span class="eyebrow">${ICONS.idcard} Aadhaar verification</span>
+      <span class="eyebrow">${ICONS.idcard} Identity verification</span>
       <h1 class="screen-title">Verify with Aadhaar</h1>
-      <p class="screen-sub">This confirms your identity and permanent address directly from UIDAI records.</p>
+      <p class="screen-sub">Enter your Aadhaar number. We'll send a code to your registered mobile number to confirm it's you.</p>
       <label for="aadhaar-input">Aadhaar number</label>
       <input id="aadhaar-input" type="text" inputmode="numeric" placeholder="XXXX XXXX XXXX" value="${state.aadhaarNumber}" maxlength="14">
       <div class="value-nudge">${ICONS.lock} Used only to verify your identity and permanent address.</div>
@@ -201,12 +256,58 @@ const screens = {
   },
 
   'aadhaar-otp'() {
+    const last4 = scenario().profile.linkedMobileLast4;
     return `
       <span class="eyebrow">${ICONS.idcard} Verify code</span>
       <h1 class="screen-title">Enter the code we sent</h1>
-      <p class="screen-sub">Sent to your Aadhaar-linked mobile number. <span class="mono">(Demo, any 6 digits work)</span></p>
+      <p class="screen-sub">Sent to your Aadhaar-registered mobile number, ending in ${last4}. <span class="mono">(Demo, any 6 digits work)</span></p>
       <input id="aadhaar-otp-input" class="otp-input" type="text" inputmode="numeric" maxlength="6" placeholder="······" value="${state.aadhaarOtp}">
-      <div class="btn-row"><button class="btn btn-primary" id="verify-aadhaar-otp" ${state.aadhaarOtp.length === 6 ? '' : 'disabled'}>${state.aadhaarVerifying ? '<span class="spin"></span>' : 'Verify'}</button></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="verify-aadhaar-otp" ${state.aadhaarOtp.length === 6 ? '' : 'disabled'}>${state.aadhaarVerifying ? '<span class="spin"></span>' : 'Verify'}</button>
+        <button class="link-btn" id="resend-aadhaar-otp">Resend code in 0:30</button>
+      </div>
+    `;
+  },
+
+  setup() {
+    const options = [
+      { id: 'employed', t: 'Employed', s: 'Salaried, whether from an office or remote' },
+      { id: 'shop', t: 'Shop / store owner', s: 'I run a retail shop or business outlet' },
+      { id: 'selfemployed', t: 'Self-employed, no storefront', s: 'Freelancer, consultant, or home-based practice' },
+    ];
+    return `
+      <span class="eyebrow">${ICONS.home} Setup</span>
+      <h1 class="screen-title">What best describes your work?</h1>
+      <p class="screen-sub">This decides what we ask for next, nothing more than we need.</p>
+      ${options.map((o) => `
+        <div class="radio-card ${state.setupType === o.id ? 'selected' : ''}" data-setup="${o.id}">
+          <div class="dot"></div>
+          <div><div class="rt">${o.t}</div><div class="rs">${o.s}</div></div>
+        </div>`).join('')}
+      <div class="btn-row"><button class="btn btn-primary" id="continue-setup" ${state.setupType ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  'business-stub'() {
+    return `
+      <div class="center" style="margin:auto 0;">
+        <div class="hero-icon">${ICONS.clock}</div>
+        <h1 class="screen-title">Almost there for shop owners</h1>
+        <p class="screen-sub">Business verification isn't live in this preview yet. We're finishing it next. Try Employed or Self-employed to see the full journey.</p>
+      </div>
+      <div class="btn-row"><button class="btn btn-secondary" data-go="setup">← Choose a different option</button></div>
+    `;
+  },
+
+  'email-verify'() {
+    const needsWork = state.setupType === 'employed';
+    return `
+      <span class="eyebrow">${ICONS.mail} Contact details</span>
+      <h1 class="screen-title">Verify your email${needsWork ? 's' : ''}</h1>
+      <p class="screen-sub">${needsWork ? "Your personal email is where we send statements. Your office email gives us a second way to reach you if we can't reach you at home." : "We'll use this for statements and account updates."}</p>
+      ${emailBlock('personalEmail', 'Personal email', 'you@example.com')}
+      ${needsWork ? emailBlock('workEmail', 'Office email', 'you@company.com') : ''}
+      <div class="btn-row"><button class="btn btn-primary" id="continue-emails" ${state.personalEmail.verified && (!needsWork || state.workEmail.verified) ? '' : 'disabled'}>Continue</button></div>
     `;
   },
 
@@ -258,108 +359,45 @@ const screens = {
         <input id="current-address-input" type="text" value="${state.currentAddressDraft}">
       ` : ''}
       <div class="btn-row">
-        <button class="btn btn-primary" data-go="setup">Yes, that's correct</button>
+        <button class="btn btn-primary" data-go="capture-intro">Yes, that's correct</button>
         <button class="link-btn muted" id="edit-permanent">That's not quite right</button>
       </div>
     `;
   },
 
-  setup() {
-    const options = [
-      { id: 'employed', t: 'Employed', s: 'Salaried, whether from an office or remote' },
-      { id: 'shop', t: 'Shop / store owner', s: 'I run a retail shop or business outlet' },
-      { id: 'selfemployed', t: 'Self-employed, no storefront', s: 'Freelancer, consultant, or home-based practice' },
-    ];
-    return `
-      <span class="eyebrow">${ICONS.home} Setup</span>
-      <h1 class="screen-title">What best describes your work?</h1>
-      <p class="screen-sub">This decides what we ask for next, nothing more than we need.</p>
-      ${options.map((o) => `
-        <div class="radio-card ${state.setupType === o.id ? 'selected' : ''}" data-setup="${o.id}">
-          <div class="dot"></div>
-          <div><div class="rt">${o.t}</div><div class="rs">${o.s}</div></div>
-        </div>`).join('')}
-      <div class="btn-row"><button class="btn btn-primary" id="continue-setup" ${state.setupType ? '' : 'disabled'}>Continue</button></div>
-    `;
-  },
-
-  'business-stub'() {
-    return `
-      <div class="center" style="margin:auto 0;">
-        <div class="hero-icon">${ICONS.clock}</div>
-        <h1 class="screen-title">Almost there for shop owners</h1>
-        <p class="screen-sub">Business verification isn't live in this preview yet. We're finishing it next. Try Employed or Self-employed to see the full journey.</p>
-      </div>
-      <div class="btn-row"><button class="btn btn-secondary" data-go="setup">← Choose a different option</button></div>
-    `;
-  },
-
-  'work-email'() {
-    return `
-      <span class="eyebrow">${ICONS.mail} Optional</span>
-      <h1 class="screen-title">Add your work email</h1>
-      <p class="screen-sub">This gives us a second way to reach you if we're ever unable to reach you at home.</p>
-      <input id="work-email-input" type="email" placeholder="you@company.com" value="${state.workEmail}">
-      <div class="btn-row">
-        <button class="btn btn-primary" id="check-work-email" ${state.workEmail.includes('@') ? '' : 'disabled'}>${state.checkingEmail ? '<span class="spin"></span>' : 'Add work email'}</button>
-        <button class="link-btn muted" data-go="checking">Skip for now</button>
-      </div>
-    `;
-  },
-
-  checking() {
-    return `
-      <div style="margin-top:12px;">
-        <h1 class="screen-title">Checking your address</h1>
-        <p class="screen-sub">Comparing a couple of records that already know you. No photo needed yet.</p>
-        <div id="check-list"></div>
-      </div>
-    `;
-  },
-
-  'outcome-clear'() {
-    return outcomeMarkup({
-      tone: 'success',
-      headline: "You're verified",
-      sub: 'We matched your address across trusted records. No photos or visits needed.',
-      cta: 'See my loan offer',
-      celebrate: true,
-    });
-  },
-
-  'stepup-intro'() {
+  'capture-intro'() {
     return `
       <div style="margin-top:6px;">
         <div class="hero-icon">${ICONS.shield}</div>
-        <h1 class="screen-title">One quick check left</h1>
-        <p class="screen-sub">We didn't find enough matching records yet. A live photo and location check finishes this in about 30 seconds.</p>
+        <h1 class="screen-title">Let's confirm your premises</h1>
+        <p class="screen-sub">A verified Aadhaar and email tell us who you are and how to reach you. This last step confirms you're actually at this address right now, it takes about 30 seconds.</p>
         <div class="reassure-list">
           <div class="reassure-item"><div class="reassure-icon">${ICONS.pin}</div><div class="reassure-text"><div class="rt">Used once</div><div class="rs">We check your location only for this step, nothing is tracked afterward.</div></div></div>
           <div class="reassure-item"><div class="reassure-icon">${ICONS.lock}</div><div class="reassure-text"><div class="rt">Kept secure</div><div class="rs">Your photo is encrypted and used only to verify this application.</div></div></div>
           <div class="reassure-item"><div class="reassure-icon">${ICONS.noVisit}</div><div class="reassure-text"><div class="rt">No one visits</div><div class="rs">This replaces an in-person visit for this step.</div></div></div>
         </div>
       </div>
-      <div class="btn-row"><button class="btn btn-primary" data-go="stepup-geo">Continue</button></div>
+      <div class="btn-row"><button class="btn btn-primary" data-go="capture-geo">Continue</button></div>
     `;
   },
 
-  'stepup-geo'() {
+  'capture-geo'() {
     if (state.geoConfirmed) {
       return `
         <h1 class="screen-title">Location confirmed</h1>
         <div class="geo-card"><div class="gi">${ICONS.pin}</div><div><div class="gt">You're in the right area</div><div class="gs">Confirmed just now, used once for this check</div></div></div>
-        <div class="btn-row"><button class="btn btn-primary" data-go="stepup-camera">Continue</button></div>
+        <div class="btn-row"><button class="btn btn-primary" data-go="capture-camera">Continue</button></div>
       `;
     }
     return `
       <div class="hero-icon">${ICONS.pin}</div>
       <h1 class="screen-title">Confirm your location</h1>
       <p class="screen-sub">A one-time check against your address. Not continuous tracking, and never shared elsewhere.</p>
-      <div class="btn-row"><button class="btn btn-primary" id="capture-geo">${state.geoLoading ? '<span class="spin"></span>' : 'Share location'}</button></div>
+      <div class="btn-row"><button class="btn btn-primary" id="capture-geo-btn">${state.geoLoading ? '<span class="spin"></span>' : 'Share location'}</button></div>
     `;
   },
 
-  'stepup-camera'() {
+  'capture-camera'() {
     return `
       <h1 class="screen-title">Show your door number</h1>
       <p class="screen-sub">Point your camera at your house number or door plate.</p>
@@ -371,7 +409,7 @@ const screens = {
     `;
   },
 
-  'stepup-checking'() {
+  'capture-checking'() {
     return `
       <div style="margin-top:12px;">
         <h1 class="screen-title">Just a moment</h1>
@@ -381,26 +419,23 @@ const screens = {
     `;
   },
 
-  'outcome-stepup-clear'() {
+  'outcome-clear'() {
     return outcomeMarkup({
       tone: 'success',
-      headline: 'Verified',
-      sub: 'Your live photo and location confirm the rest. You did great.',
+      headline: "You're verified",
+      sub: 'Your identity, contact details, and live premises check are all confirmed.',
       cta: 'See my loan offer',
       celebrate: true,
     });
   },
 
   'outcome-decline'() {
-    const isConflict = state.routeDecision?.lane === 'decline';
     return outcomeMarkup({
       tone: 'neutral',
-      headline: isConflict ? "That address doesn't match our records" : "We couldn't confirm this automatically",
-      sub: isConflict
-        ? "The address you entered doesn't match what we found on file. Double-check it and try again, most mismatches are a quick fix."
-        : "Location or photo signals don't always come through clearly on the first try. You're welcome to try again, or we can help directly.",
-      cta: isConflict ? 'Review my address' : 'Try again',
-      ctaAction: isConflict ? 'review-address' : 'retry-stepup',
+      headline: "We couldn't confirm this automatically",
+      sub: "Location or photo signals don't always come through clearly on the first try. You're welcome to try again, or we can help directly.",
+      cta: 'Try again',
+      ctaAction: 'retry-capture',
       secondaryCta: 'Contact support',
     });
   },
@@ -426,13 +461,12 @@ function outcomeMarkup({ tone, headline, sub, cta, celebrate, ctaAction, seconda
       <div class="outcome-headline">${headline}</div>
       <div class="outcome-sub">${sub}</div>
     </div>
-    ${trace.length ? `
     <button class="trace-toggle ${state.traceOpen ? 'open' : ''}" id="trace-toggle">What we checked ${ICONS.chevronDown}</button>
     <div class="trace-panel ${state.traceOpen ? 'open' : ''}">
       <div class="trace-panel-inner">
         ${trace.map((t) => `<div class="trace-line ${t.ok ? 'yes' : 'no'}">${t.ok ? ICONS.check : ICONS.x}<span>${t.label}</span></div>`).join('')}
       </div>
-    </div>` : ''}
+    </div>
     <div class="btn-row">
       <button class="btn btn-primary" id="outcome-cta" data-action="${ctaAction || 'restart'}">${cta}</button>
       ${secondaryCta ? `<button class="link-btn muted" id="outcome-secondary">${secondaryCta}</button>` : ''}
@@ -440,16 +474,14 @@ function outcomeMarkup({ tone, headline, sub, cta, celebrate, ctaAction, seconda
   `;
 }
 
-// Plain-language summary only, no internal match percentages or engine terms.
 function buildFullTrace() {
-  const lines = [];
-  if (state.corroboration) {
-    for (const t of state.corroboration.trace) {
-      lines.push({ ok: t.result === 'agree', label: `${t.source}: ${t.result === 'agree' ? 'matches your address' : t.result === 'too-fresh' ? 'on file, but too recent to count yet' : "doesn't match your address"}` });
-    }
-  }
+  const lines = [
+    { ok: true, label: 'Aadhaar: identity verified' },
+    { ok: true, label: 'Personal email: verified' },
+  ];
+  if (state.setupType === 'employed') lines.push({ ok: true, label: 'Office email: verified' });
   if (state.captureVerdict) {
-    lines.push({ ok: state.captureVerdict.ok, label: state.captureVerdict.ok ? 'Live capture: confirmed genuine and live' : 'Live capture: could not confirm this was a genuine, live submission' });
+    lines.push({ ok: state.captureVerdict.ok, label: state.captureVerdict.ok ? 'Live capture: confirmed genuine and live at this address' : 'Live capture: could not confirm this was a genuine, live submission' });
   }
   return lines;
 }
@@ -466,40 +498,16 @@ function render() {
 function wireEvents() {
   root.querySelectorAll('[data-go]').forEach((el) => el.addEventListener('click', () => goto(el.dataset.go)));
 
-  if (state.screen === 'mobile') {
-    bindInput('mobile-input', {
-      transform: (v) => v.replace(/\D/g, '').slice(0, 10),
-      onChange: (v) => { state.mobile = v; },
-      buttonId: 'send-otp', isValid: (v) => v.length === 10,
-    });
-    document.getElementById('send-otp')?.addEventListener('click', () => { startResendTimer(); goto('otp'); });
-  }
-
-  if (state.screen === 'otp') {
-    bindInput('otp-input', {
-      transform: (v) => v.replace(/\D/g, '').slice(0, 6),
-      onChange: (v) => { state.otp = v; if (v.length === 6) verifyMobileOtp(); },
-      buttonId: 'verify-otp', isValid: (v) => v.length === 6,
-    });
-    document.getElementById('verify-otp')?.addEventListener('click', verifyMobileOtp);
-    document.getElementById('resend-otp')?.addEventListener('click', startResendTimer);
-  }
-
-  if (state.screen === 'personal-email') {
-    bindInput('personal-email-input', {
-      onChange: (v) => { state.personalEmail = v; },
-      buttonId: 'continue-email', isValid: (v) => v.includes('@'),
-    });
-    document.getElementById('continue-email')?.addEventListener('click', () => goto('aadhaar-number'));
-  }
-
   if (state.screen === 'aadhaar-number') {
     bindInput('aadhaar-input', {
       transform: formatAadhaar,
       onChange: (v) => { state.aadhaarNumber = v; },
       buttonId: 'send-aadhaar-otp', isValid: (v) => v.replace(/\D/g, '').length === 12,
     });
-    document.getElementById('send-aadhaar-otp')?.addEventListener('click', () => goto('aadhaar-otp'));
+    document.getElementById('send-aadhaar-otp')?.addEventListener('click', () => {
+      goto('aadhaar-otp');
+      startResendTimer('resend-aadhaar-otp');
+    });
   }
 
   if (state.screen === 'aadhaar-otp') {
@@ -509,6 +517,21 @@ function wireEvents() {
       buttonId: 'verify-aadhaar-otp', isValid: (v) => v.length === 6,
     });
     document.getElementById('verify-aadhaar-otp')?.addEventListener('click', verifyAadhaarOtp);
+    document.getElementById('resend-aadhaar-otp')?.addEventListener('click', () => startResendTimer('resend-aadhaar-otp'));
+  }
+
+  if (state.screen === 'setup') {
+    root.querySelectorAll('[data-setup]').forEach((el) => el.addEventListener('click', () => { state.setupType = el.dataset.setup; render(); }));
+    document.getElementById('continue-setup')?.addEventListener('click', () => {
+      if (state.setupType === 'shop') goto('business-stub');
+      else goto('email-verify');
+    });
+  }
+
+  if (state.screen === 'email-verify') {
+    wireEmailBlock('personalEmail');
+    if (state.setupType === 'employed') wireEmailBlock('workEmail');
+    document.getElementById('continue-emails')?.addEventListener('click', () => goto('pan'));
   }
 
   if (state.screen === 'pan') {
@@ -542,47 +565,23 @@ function wireEvents() {
     bindInput('permanent-draft-input', { onChange: (v) => { state.permanentAddressDraft = v; } });
   }
 
-  if (state.screen === 'setup') {
-    root.querySelectorAll('[data-setup]').forEach((el) => el.addEventListener('click', () => { state.setupType = el.dataset.setup; render(); }));
-    document.getElementById('continue-setup')?.addEventListener('click', () => {
-      if (state.setupType === 'shop') goto('business-stub');
-      else if (state.setupType === 'employed') goto('work-email');
-      else goto('checking');
-    });
-  }
+  if (state.screen === 'capture-checking') runCaptureCheck();
 
-  if (state.screen === 'work-email') {
-    bindInput('work-email-input', {
-      onChange: (v) => { state.workEmail = v; },
-      buttonId: 'check-work-email', isValid: (v) => v.includes('@'),
-    });
-    document.getElementById('check-work-email')?.addEventListener('click', async () => {
-      state.checkingEmail = true; render();
-      await sleep(500);
-      state.checkingEmail = false;
-      goto('checking');
-    });
-  }
-
-  if (state.screen === 'checking') runCorroborationCheck();
-  if (state.screen === 'stepup-checking') runCaptureCheck();
-
-  if (state.screen === 'stepup-geo') {
-    document.getElementById('capture-geo')?.addEventListener('click', async () => {
+  if (state.screen === 'capture-geo') {
+    document.getElementById('capture-geo-btn')?.addEventListener('click', async () => {
       state.geoLoading = true; render();
       await sleep(800);
       state.geoLoading = false; state.geoConfirmed = true; render();
     });
   }
-  if (state.screen === 'stepup-camera') runCameraGuidance();
+  if (state.screen === 'capture-camera') runCameraGuidance();
 
-  if (['outcome-clear', 'outcome-stepup-clear', 'outcome-decline'].includes(state.screen)) {
-    if (state.screen !== 'outcome-decline') fireConfetti();
+  if (['outcome-clear', 'outcome-decline'].includes(state.screen)) {
+    if (state.screen === 'outcome-clear') fireConfetti();
     document.getElementById('trace-toggle')?.addEventListener('click', () => { state.traceOpen = !state.traceOpen; render(); });
     document.getElementById('outcome-cta')?.addEventListener('click', (e) => {
       const action = e.currentTarget.dataset.action;
-      if (action === 'review-address') { state.editingPermanent = false; goto('profile'); }
-      else if (action === 'retry-stepup') { state.geoConfirmed = false; state.cameraReady = false; goto('stepup-geo'); }
+      if (action === 'retry-capture') { state.geoConfirmed = false; goto('capture-geo'); }
       else resetFlow();
     });
     document.getElementById('outcome-secondary')?.addEventListener('click', () => goto('support-stub'));
@@ -590,66 +589,17 @@ function wireEvents() {
   if (state.screen === 'support-stub') document.getElementById('restart')?.addEventListener('click', resetFlow);
 }
 
-function startResendTimer() {
-  clearInterval(state.resendTimer);
-  state.resendIn = 30;
-  state.resendTimer = setInterval(() => {
-    state.resendIn--;
-    if (state.resendIn <= 0) clearInterval(state.resendTimer);
-    if (state.screen === 'otp') render();
-  }, 1000);
-}
-
-async function verifyMobileOtp() {
-  if (state.otp.length !== 6) return;
-  state.verifying = true; render();
-  await sleep(450);
-  state.verifying = false;
-  clearInterval(state.resendTimer);
-  goto('personal-email');
-  showToast('Number verified successfully');
-}
-
 async function verifyAadhaarOtp() {
   if (state.aadhaarOtp.length !== 6) return;
   state.aadhaarVerifying = true; render();
   await sleep(450);
   state.aadhaarVerifying = false;
-  goto('pan');
-  showToast('Aadhaar verified successfully');
+  clearInterval(state.resendTimer);
+  goto('setup');
+  showToast('Aadhaar and mobile verified successfully');
 }
 
 // ---- async flows ----------------------------------------------------------
-async function runCorroborationCheck() {
-  const s = scenario();
-  const sources = [
-    { name: 'Aadhaar', address: permanentAddress(), tenureMonths: AADHAAR_TENURE_MONTHS },
-    { name: 'Telecom KYC', address: s.telecomAddress.address, tenureMonths: s.telecomAddress.tenureMonths },
-  ];
-  const list = document.getElementById('check-list');
-  const rows = sources.map((src, i) => ({ src, done: false, delay: i * 90 }));
-  const draw = () => {
-    list.innerHTML = rows.map(({ src, done, delay }) => `
-      <div class="check-row" style="animation-delay:${delay}ms">
-        <div class="check-icon ${done ? 'ok' : ''}">${done ? ICONS.check : ''}</div>
-        <div class="check-name">${src.name}</div>
-      </div>`).join('');
-  };
-  draw();
-  for (const row of rows) {
-    await sleep(SOURCE_CHECK_LATENCY_MS);
-    row.done = true; draw();
-  }
-  await sleep(350);
-
-  state.corroboration = scoreCorroboration(declaredAddress(), sources);
-  state.routeDecision = routeFromCorroboration(state.corroboration);
-
-  if (state.routeDecision.lane === 'clear') goto('outcome-clear', { replace: true });
-  else if (state.routeDecision.lane === 'decline') goto('outcome-decline', { replace: true });
-  else goto('stepup-intro', { replace: true });
-}
-
 async function runCameraGuidance() {
   const pill = document.getElementById('guidance-pill');
   const pillText = document.getElementById('guidance-text');
@@ -661,7 +611,7 @@ async function runCameraGuidance() {
   pillText.textContent = 'Looks good';
   btn.disabled = false;
   btn.addEventListener('click', () => {
-    goto('stepup-checking');
+    goto('capture-checking');
   }, { once: true });
 }
 
@@ -688,7 +638,7 @@ async function runCaptureCheck() {
 
   state.captureVerdict = { ok };
   state.captureRouteDecision = routeFromCapture({ geofenceOk: ok, ocrLivenessOk: ok, mockLocationFlag: !ok });
-  goto(state.captureRouteDecision.lane === 'stepup-clear' ? 'outcome-stepup-clear' : 'outcome-decline', { replace: true });
+  goto(state.captureRouteDecision.lane === 'clear' ? 'outcome-clear' : 'outcome-decline', { replace: true });
 }
 
 function fireConfetti() {

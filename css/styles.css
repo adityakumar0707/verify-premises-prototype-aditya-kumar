@@ -212,6 +212,25 @@ input:focus{outline:none; border-color:var(--brand); background:var(--surface); 
 .check-toggle .ct{font-weight:600; font-size:.92rem;}
 .check-toggle .cs{font-size:.8rem; color:var(--ink-faint); margin-top:1px;}
 
+/* ---- inline email verification block ---- */
+.email-block{margin-bottom:20px;}
+.email-block label{margin-bottom:7px;}
+.email-block input{margin-bottom:8px;}
+.verify-link{background:none; border:none; color:var(--brand); font-weight:700; font-size:.86rem; cursor:pointer; padding:2px 0; float:right;}
+.verify-link:disabled{color:var(--ink-faint); cursor:not-allowed;}
+.otp-inline-row{display:flex; gap:8px; align-items:stretch; clear:both;}
+.otp-input-sm{font-family:'IBM Plex Mono',monospace; letter-spacing:.35em; text-align:center; font-size:1.05rem; flex:1; padding:11px 10px 11px 16px; border:1.5px solid var(--border); border-radius:var(--radius-sm); background:var(--surface-2); color:var(--ink);}
+.otp-input-sm:focus{outline:none; border-color:var(--brand); background:var(--surface); box-shadow:0 0 0 4px var(--brand-tint);}
+.btn-sm-primary{background:var(--brand); color:#fff; border:none; border-radius:var(--radius-sm); padding:0 18px; font-weight:700; font-size:.86rem; cursor:pointer; white-space:nowrap;}
+.btn-sm-primary:disabled{opacity:.42; cursor:not-allowed;}
+.btn-sm-primary .spin{width:14px; height:14px; border-radius:50%; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; animation:spin .7s linear infinite; display:inline-block;}
+.email-block .field-hint{clear:both; margin-top:8px;}
+.email-verified-row{display:flex; align-items:center; gap:10px; background:var(--brand-tint); border-radius:var(--radius-sm); padding:12px 14px;}
+.ev-check{width:20px; height:20px; border-radius:50%; background:var(--brand); display:flex; align-items:center; justify-content:center; flex-shrink:0;}
+.ev-check svg{width:11px; height:11px; stroke:#fff;}
+.ev-value{flex:1; font-weight:600; font-size:.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.ev-tag{font-family:'IBM Plex Mono',monospace; font-size:.68rem; font-weight:700; text-transform:uppercase; color:var(--brand-strong); flex-shrink:0;}
+
 /* ---- simulated (non-live) camera illustration ---- */
 .camera-illustration{width:100%; aspect-ratio:3/4; background:linear-gradient(160deg, #16211D 0%, #0b0f0d 100%); border-radius:var(--radius-md); overflow:hidden; position:relative; margin-bottom:16px; box-shadow:var(--shadow-md); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;}
 .camera-illustration .ci-icon{width:64px; height:64px; border-radius:50%; background:rgba(255,255,255,.08); display:flex; align-items:center; justify-content:center;}
