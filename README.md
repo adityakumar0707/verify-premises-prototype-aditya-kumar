@@ -34,9 +34,11 @@ their office in the same sitting.
 1. **Loan amount, first.** Everything downstream (whether a live capture is
    ever asked for at all) depends on this, so we ask before anything else.
    Above ₹5,00,000 is the "large" tier. Large-tier applicants immediately
-   see one screen listing everything extra that tier requires (a selfie,
-   home photos, office or shop photos), so it's said once, upfront, never
-   repeated as a surprise at each individual step.
+   see one screen listing the two live checks that tier actually guarantees
+   (a selfie, home photos), so it's said once, upfront, never repeated as a
+   surprise at each individual step. Office or shop photos aren't listed
+   here since they're a conditional fallback, not a guaranteed step (see
+   below); mentioning them upfront as if certain would be misleading.
 2. **Aadhaar number → one OTP.** The code goes to the mobile number UIDAI
    already has on file for that Aadhaar, so verifying it confirms two
    things at once: this is a real Aadhaar identity, and the applicant

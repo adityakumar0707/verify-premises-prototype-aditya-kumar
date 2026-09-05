@@ -347,7 +347,6 @@ const screens = {
       <div class="reassure-list">
         <div class="reassure-item"><div class="reassure-icon">${ICONS.idcard}</div><div class="reassure-text"><div class="rt">A selfie</div><div class="rs">Matched against your Aadhaar photo</div></div></div>
         <div class="reassure-item"><div class="reassure-icon">${ICONS.home}</div><div class="reassure-text"><div class="rt">Two photos of your home</div><div class="rs">Your entrance and yourself, plus your location</div></div></div>
-        <div class="reassure-item"><div class="reassure-icon">${ICONS.bank}</div><div class="reassure-text"><div class="rt">Two photos of your office or shop</div><div class="rs">Only if we can't confirm it automatically first</div></div></div>
       </div>
       <div class="btn-row"><button class="btn btn-primary" id="continue-tier-notice">Continue</button></div>
     `;
