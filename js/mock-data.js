@@ -49,4 +49,5 @@ export const TOGGLES = {
   captureOk: true,
   gstinPanValid: true,
   epfoAvailable: true,
+  officeAddressValid: true,
 };

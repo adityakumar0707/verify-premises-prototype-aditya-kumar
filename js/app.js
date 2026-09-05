@@ -18,8 +18,7 @@ const state = {
   homePincode: '', homeCity: '', homeState: '', homeAddressLine: '',
   homeOwnership: null,
   officeBuilding: '', officeFloor: '', officeUnit: '', officePincode: '', officeCity: '', officeState: '',
-  officeValidating: false, officeValidated: false,
-  businessChoice: null, businessGstinInput: '', businessPanInput: '',
+  officeValidating: false, officeValidated: false, officeValidationFailed: false,
   captureContext: null, captureShotIndex: 0, geoLoading: false, geoConfirmed: false,
   trace: [], retryTarget: null,
   traceOpen: false,
@@ -63,7 +62,7 @@ const CAPTURE_COPY = {
   },
   office: {
     introTitle: 'Office photos',
-    introBody: "We'll take two quick photos of your office, along with your location.",
+    introBody: "We couldn't confirm your office address automatically, so we'll take two quick photos instead, along with your location.",
     shots: [
       { title: 'Show your office entrance', body: 'Use your rear camera. Point it at the entrance, nameplate, or signage.' },
       { title: 'Show yourself at the office', body: 'Switch to your front camera, with your office visible behind you.' },
@@ -73,7 +72,7 @@ const CAPTURE_COPY = {
   },
   business: {
     introTitle: 'Shop photos',
-    introBody: "We'll take two quick photos of your shop, along with your location. This replaces uploading documents.",
+    introBody: "We couldn't confirm your business registration automatically, so we'll take two quick photos of your shop instead, along with your location.",
     shots: [
       { title: 'Show your shop front', body: "Use your rear camera. Point it at your shop's signage or entrance." },
       { title: 'Show yourself at the shop', body: 'Switch to your front camera, with your shop visible behind you.' },
@@ -83,7 +82,7 @@ const CAPTURE_COPY = {
   },
 };
 
-const TRANSIENT = new Set(['bureau-checking', 'home-checking', 'income-docs-checking', 'capture-checking']);
+const TRANSIENT = new Set(['bureau-checking', 'home-checking', 'income-docs-checking', 'capture-checking', 'business-address']);
 
 function goto(screen, { replace = false } = {}) {
   if (!replace && state.screen !== screen) state.history.push(state.screen);
@@ -127,6 +126,7 @@ function renderDemoPanel() {
     ['captureOk', 'Live capture succeeds'],
     ['gstinPanValid', 'GSTIN + business PAN valid'],
     ['epfoAvailable', 'EPFO record available'],
+    ['officeAddressValid', 'Office address validates on the map'],
   ];
   panel.innerHTML = `
     <div class="dt">Background checks (reviewer only)</div>
@@ -157,8 +157,7 @@ function resetFlow() {
     homePincode: '', homeCity: '', homeState: '', homeAddressLine: '',
     homeOwnership: null,
     officeBuilding: '', officeFloor: '', officeUnit: '', officePincode: '', officeCity: '', officeState: '',
-    officeValidating: false, officeValidated: false,
-    businessChoice: null, businessGstinInput: '', businessPanInput: '',
+    officeValidating: false, officeValidated: false, officeValidationFailed: false,
     captureContext: null, captureShotIndex: 0, geoLoading: false, geoConfirmed: false,
     trace: [], retryTarget: null, traceOpen: false,
   });
@@ -172,11 +171,11 @@ const STATIC_STAGE_OF = {
   'loan-amount': 1, 'tier-notice': 1, 'aadhaar-number': 1, 'aadhaar-otp': 1, persona: 1, 'gst-check': 1, 'email-verify': 1,
   pan: 2, 'bureau-checking': 2, offer: 2, 'income-account': 2, 'income-docs-checking': 2,
   'home-same': 3, 'home-pincode': 3, 'home-ownership': 3, 'home-checking': 3,
-  'office-address': 4, 'business-address': 4, 'business-documents': 4,
+  'office-address': 4, 'business-address': 4,
   'outcome-clear': 5, 'outcome-decline': 5, 'support-stub': 5,
 };
 const CAPTURE_STAGE = { selfie: 1, home: 3, office: 4, business: 4 };
-const NO_BACK = new Set(['welcome', 'bureau-checking', 'home-checking', 'income-docs-checking', 'capture-checking', 'outcome-clear', 'outcome-decline']);
+const NO_BACK = new Set(['welcome', 'bureau-checking', 'home-checking', 'income-docs-checking', 'capture-checking', 'business-address', 'outcome-clear', 'outcome-decline']);
 
 function currentStage() {
   if (state.screen.startsWith('capture-')) return CAPTURE_STAGE[state.captureContext] ?? 1;
@@ -348,7 +347,7 @@ const screens = {
       <div class="reassure-list">
         <div class="reassure-item"><div class="reassure-icon">${ICONS.idcard}</div><div class="reassure-text"><div class="rt">A selfie</div><div class="rs">Matched against your Aadhaar photo</div></div></div>
         <div class="reassure-item"><div class="reassure-icon">${ICONS.home}</div><div class="reassure-text"><div class="rt">Two photos of your home</div><div class="rs">Your entrance and yourself, plus your location</div></div></div>
-        <div class="reassure-item"><div class="reassure-icon">${ICONS.bank}</div><div class="reassure-text"><div class="rt">Two photos of your office or shop</div><div class="rs">Same as above, if that applies to you</div></div></div>
+        <div class="reassure-item"><div class="reassure-icon">${ICONS.bank}</div><div class="reassure-text"><div class="rt">Two photos of your office or shop</div><div class="rs">Only if we can't confirm it automatically first</div></div></div>
       </div>
       <div class="btn-row"><button class="btn btn-primary" id="continue-tier-notice">Continue</button></div>
     `;
@@ -614,8 +613,16 @@ const screens = {
           <div class="check-row" style="border:none;padding:6px 0;"><div class="check-icon ${state.toggles.epfoAvailable ? 'ok' : ''}">${state.toggles.epfoAvailable ? ICONS.check : ''}</div><div class="check-name">Salary account matches employer (bonus)</div></div>
         </div>
       ` : ''}
+      ${state.officeValidationFailed ? `
+        <div class="recovery-card">
+          <div style="font-weight:700;">We couldn't verify this on the map</div>
+          <div style="font-size:.86rem;color:var(--ink-soft);margin-top:4px;">No problem, a quick photo of your office will confirm it instead.</div>
+        </div>
+      ` : ''}
       <div class="btn-row">
-        <button class="btn btn-primary" id="${state.officeValidated ? 'continue-office' : 'validate-office'}" ${state.officeValidated || canValidate ? '' : 'disabled'}>${state.officeValidating ? '<span class="spin"></span>' : (state.officeValidated ? 'Continue' : 'Validate address')}</button>
+        ${state.officeValidationFailed
+          ? `<button class="btn btn-primary" id="office-take-photo">Take a photo instead</button>`
+          : `<button class="btn btn-primary" id="${state.officeValidated ? 'continue-office' : 'validate-office'}" ${state.officeValidated || canValidate ? '' : 'disabled'}>${state.officeValidating ? '<span class="spin"></span>' : (state.officeValidated ? 'Continue' : 'Validate address')}</button>`}
       </div>
     `;
   },
@@ -624,28 +631,9 @@ const screens = {
     const gstin = buildGstin(state.pan);
     return `
       <span class="eyebrow">${ICONS.shop} Business address</span>
-      <h1 class="screen-title">Let's confirm your business address</h1>
+      <h1 class="screen-title">Confirming your business address</h1>
       <div class="geo-card"><div class="gi">${ICONS.doc}</div><div><div class="gt">${BUSINESS_INFO.legalName}</div><div class="gs">GSTIN ${gstin}, found using your PAN</div></div></div>
-      <p class="screen-sub">Confirm this address with a live photo of your shop, or upload your GSTIN and business PAN instead.</p>
-      <div class="radio-card ${state.businessChoice === 'photo' ? 'selected' : ''}" data-bizchoice="photo">
-        <div class="dot"></div><div><div class="rt">Take a live shop photo</div><div class="rs">Quickest, confirms the address right away</div></div>
-      </div>
-      <div class="radio-card ${state.businessChoice === 'documents' ? 'selected' : ''}" data-bizchoice="documents">
-        <div class="dot"></div><div><div class="rt">Upload GSTIN and business PAN</div><div class="rs">No photo needed</div></div>
-      </div>
-      <div class="btn-row"><button class="btn btn-primary" id="continue-business-choice" ${state.businessChoice ? '' : 'disabled'}>Continue</button></div>
-    `;
-  },
-
-  'business-documents'() {
-    return `
-      <span class="eyebrow">${ICONS.doc} Business documents</span>
-      <h1 class="screen-title">Confirm your business registration</h1>
-      <label for="biz-gstin-input">GSTIN</label>
-      <input id="biz-gstin-input" type="text" placeholder="07ABCDE1234F1Z5" maxlength="15" style="text-transform:uppercase" value="${state.businessGstinInput}">
-      <label for="biz-pan-input">Business PAN</label>
-      <input id="biz-pan-input" type="text" placeholder="ABCDE1234F" maxlength="10" style="text-transform:uppercase" value="${state.businessPanInput}">
-      <div class="btn-row"><button class="btn btn-primary" id="submit-business-docs" ${state.businessGstinInput.length === 15 && state.businessPanInput.length === 10 ? '' : 'disabled'}>Submit</button></div>
+      <div id="business-check-list" style="margin-top:8px;"></div>
     `;
   },
 
@@ -858,13 +846,14 @@ function wireEvents() {
 
   if (state.screen === 'office-address') {
     const canValidate = () => state.officeBuilding.trim() && state.officeFloor.trim() && state.officeUnit.trim() && state.officePincode.replace(/\D/g, '').length === 6;
-    bindInput('office-building-input', { onChange: (v) => { state.officeBuilding = v; state.officeValidated = false; }, buttonId: 'validate-office', isValid: canValidate });
-    bindInput('office-floor-input', { onChange: (v) => { state.officeFloor = v; state.officeValidated = false; }, buttonId: 'validate-office', isValid: canValidate });
-    bindInput('office-unit-input', { onChange: (v) => { state.officeUnit = v; state.officeValidated = false; }, buttonId: 'validate-office', isValid: canValidate });
+    const resetValidation = () => { state.officeValidated = false; state.officeValidationFailed = false; };
+    bindInput('office-building-input', { onChange: (v) => { state.officeBuilding = v; resetValidation(); }, buttonId: 'validate-office', isValid: canValidate });
+    bindInput('office-floor-input', { onChange: (v) => { state.officeFloor = v; resetValidation(); }, buttonId: 'validate-office', isValid: canValidate });
+    bindInput('office-unit-input', { onChange: (v) => { state.officeUnit = v; resetValidation(); }, buttonId: 'validate-office', isValid: canValidate });
     bindInput('office-pincode-input', {
       transform: (v) => v.replace(/\D/g, '').slice(0, 6),
       onChange: (v) => {
-        state.officePincode = v; state.officeValidated = false;
+        state.officePincode = v; resetValidation();
         if (v.length === 6) {
           const loc = lookupPincode(v);
           state.officeCity = loc.city; state.officeState = loc.state;
@@ -877,49 +866,23 @@ function wireEvents() {
       state.officeValidating = true; render();
       await sleep(700);
       state.officeValidating = false;
-      state.officeValidated = true;
-      pushTrace('Office address validated');
-      if (state.toggles.epfoAvailable) pushTrace('EPFO record and salary account match employer (bonus)');
+      if (state.toggles.officeAddressValid) {
+        state.officeValidated = true;
+        pushTrace('Office address validated');
+        if (state.toggles.epfoAvailable) pushTrace('EPFO record and salary account match employer (bonus)');
+      } else {
+        state.officeValidationFailed = true;
+      }
       render();
     });
-    document.getElementById('continue-office')?.addEventListener('click', () => {
-      if (state.tier === 'large') { state.captureContext = 'office'; goto('capture-intro'); }
-      else finalizeOutcome();
+    document.getElementById('continue-office')?.addEventListener('click', finalizeOutcome);
+    document.getElementById('office-take-photo')?.addEventListener('click', () => {
+      state.captureContext = 'office';
+      goto('capture-intro');
     });
   }
 
-  if (state.screen === 'business-address') {
-    root.querySelectorAll('[data-bizchoice]').forEach((el) => el.addEventListener('click', () => { state.businessChoice = el.dataset.bizchoice; render(); }));
-    document.getElementById('continue-business-choice')?.addEventListener('click', () => {
-      const gstin = buildGstin(state.pan);
-      pushTrace(`Business found using your PAN: ${BUSINESS_INFO.legalName} (GSTIN ${gstin})`);
-      if (state.businessChoice === 'photo') { state.captureContext = 'business'; goto('capture-intro'); }
-      else {
-        state.businessGstinInput = state.businessGstinInput || gstin;
-        state.businessPanInput = state.businessPanInput || state.pan;
-        goto('business-documents');
-      }
-    });
-  }
-
-  if (state.screen === 'business-documents') {
-    const isValid = () => state.businessGstinInput.length === 15 && state.businessPanInput.length === 10;
-    bindInput('biz-gstin-input', {
-      transform: (v) => v.toUpperCase().slice(0, 15),
-      onChange: (v) => { state.businessGstinInput = v; },
-      buttonId: 'submit-business-docs', isValid,
-    });
-    bindInput('biz-pan-input', {
-      transform: (v) => v.toUpperCase().slice(0, 10),
-      onChange: (v) => { state.businessPanInput = v; },
-      buttonId: 'submit-business-docs', isValid,
-    });
-    document.getElementById('submit-business-docs')?.addEventListener('click', () => {
-      const result = checkBusinessDocuments(state.toggles.gstinPanValid);
-      if (result.ok) { pushTrace(result.reason); finalizeOutcome(); }
-      else declineNow(result.reason, 'business-documents');
-    });
-  }
+  if (state.screen === 'business-address') runBusinessCheck();
 
   if (['outcome-clear', 'outcome-decline'].includes(state.screen)) {
     if (state.screen === 'outcome-clear') fireConfetti();
@@ -976,13 +939,32 @@ async function animateChecklist(listEl, steps) {
   const draw = () => {
     listEl.innerHTML = rows.map((r) => `
       <div class="check-row" style="animation-delay:${r.delay}ms">
-        <div class="check-icon ${r.done ? 'ok' : ''}">${r.done ? ICONS.check : ''}</div>
+        <div class="check-icon ${r.done ? (r.ok ? 'ok' : 'fail') : ''}">${r.done ? (r.ok ? ICONS.check : ICONS.x) : ''}</div>
         <div class="check-name">${r.name}</div>
       </div>`).join('');
   };
   draw();
   for (const row of rows) { await sleep(550); row.done = true; draw(); }
   await sleep(300);
+}
+
+// Business address is confirmed automatically using the GSTIN derived from
+// the applicant's own PAN. A live shop photo is only ever asked for as a
+// fallback when that automatic check fails, never as a default choice, so
+// a high-ticket applicant is never required to be at both their home and
+// their shop at the moment they apply.
+async function runBusinessCheck() {
+  const ok = state.toggles.gstinPanValid;
+  const steps = [{ name: 'Confirming your GSTIN and business PAN', ok }];
+  await animateChecklist(document.getElementById('business-check-list'), steps);
+  const result = checkBusinessDocuments(ok);
+  if (result.ok) {
+    pushTrace(result.reason);
+    finalizeOutcome();
+  } else {
+    state.captureContext = 'business';
+    goto('capture-intro', { replace: true });
+  }
 }
 
 async function runCaptureCheck() {

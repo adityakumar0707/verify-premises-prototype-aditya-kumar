@@ -22,6 +22,15 @@ live photo. Where it doesn't, only a live check can actually confirm
 presence, so we ask for exactly one, and only when the loan size justifies
 the friction.
 
+That also caps how many places an applicant can be asked to physically be
+at once. Home is the one live check a large loan always asks for. Office
+and business address never add a second unconditional one on top of it:
+their automated check (a maps lookup, or GSTIN and business PAN derived
+from the applicant's own PAN) runs first regardless of loan size, and a
+live photo is only asked for as a fallback if that check fails. A
+high-ticket applicant is never required to prove they're at their home and
+their office in the same sitting.
+
 1. **Loan amount, first.** Everything downstream (whether a live capture is
    ever asked for at all) depends on this, so we ask before anything else.
    Above ₹5,00,000 is the "large" tier. Large-tier applicants immediately
@@ -53,21 +62,23 @@ the friction.
 7. **Office address** (Salaried) or **business address** (Business Owner,
    or Self Employed with GST). Office address is entered as separate
    building, floor, and unit fields plus a pincode that auto-fills city
-   and state, then validated in real time like a maps lookup, a hard
-   requirement regardless of loan size; EPFO and salary-account matches
-   are shown as background bonuses that never block the outcome. Business
+   and state, then validated in real time like a maps lookup. Business
    address is found automatically using the PAN already entered at the
    credit-check step (a GSTIN is derived from its owner's PAN, so no
-   separate GSTIN entry is needed), then offers an explicit choice at any
-   loan size: a live shop photo, or confirm GSTIN and business PAN
-   instead. Self Employed without GST skips this step entirely, the home
-   address result stands alone.
+   separate GSTIN entry is needed) and confirmed against it in the
+   background. Both run at any loan size and, when they pass, that's the
+   end of it, no photo either way. Only when the automated check fails
+   does it fall back to one live photo (office entrance, or shop front),
+   and EPFO / salary-account matches are shown as background bonuses on
+   the office side that never block the outcome either way. Self Employed
+   without GST skips this step entirely, the home address result stands
+   alone.
 
-Every live check (selfie, home, office, business) takes two photos, rear
-camera on the place and front camera on the applicant with it visible
-behind them, plus location. Location is asked for once, the first time any
-check needs it, and silently reused for every check after that; it is
-never asked for a second time in the same application.
+Every live check (selfie, home, and a fallback office/business one) takes
+two photos, rear camera on the place and front camera on the applicant
+with it visible behind them, plus location. Location is asked for once,
+the first time any check needs it, and silently reused for every check
+after that; it is never asked for a second time in the same application.
 
 There is no step that leans on telecom or bank KYC as a stand-in for an
 independent check: in India that KYC is itself mostly Aadhaar-derived, so
@@ -90,28 +101,30 @@ independent one.
   uploaded registration documents). Sequencing lives in `app.js`, this file
   only answers pass or fail for a given fact.
 - `js/mock-data.js` — profile, bank accounts, business registry, pincode
-  lookup, and the five background-check toggles.
+  lookup, and the six background-check toggles.
 - `js/app.js` — screens, state, and the input-handling pattern (see below).
 - `js/icons.js` — small hand-drawn icon set (no external icon library).
 - `css/styles.css`, `index.html` — presentation shell.
 
 ## Demo controls
 
-The panel in the top corner holds five toggles standing in for backend
+The panel in the top corner holds six toggles standing in for backend
 checks a real server would run, all defaulting to true so the default
-click-through is a full happy path:
+click-through is a full happy path with no live photos needed at all
+beyond a large-tier selfie and home check:
 
 - Property record matches (self-owned homes)
 - Landlord confirms tenancy (rented homes)
-- Live capture succeeds (shared by every live check: selfie, home, office,
-  business)
-- GSTIN + business PAN valid (the document-upload path for business
-  address)
+- Live capture succeeds (shared by every live check: selfie, home, and
+  the office/business fallback)
+- GSTIN + business PAN valid (the automatic business-address check; turn
+  this off to see the live-shop-photo fallback trigger)
 - EPFO record available (office-address bonus line, never gates anything)
+- Office address validates on the map (turn this off to see the
+  live-office-photo fallback trigger)
 
-Everything else, loan amount, persona, ownership, the shop-photo-vs-
-documents choice, comes from real interaction with the UI, not a
-pre-baked scenario.
+Everything else, loan amount, persona, ownership, and the office-address
+fields, comes from real interaction with the UI, not a pre-baked scenario.
 
 ## Bugs worth documenting
 
