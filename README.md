@@ -24,12 +24,17 @@ the friction.
 
 1. **Loan amount, first.** Everything downstream (whether a live capture is
    ever asked for at all) depends on this, so we ask before anything else.
-   ₹5,00,000 or more is the "large" tier.
+   Above ₹5,00,000 is the "large" tier. Large-tier applicants immediately
+   see one screen listing everything extra that tier requires (a selfie,
+   home photos, office or shop photos), so it's said once, upfront, never
+   repeated as a surprise at each individual step.
 2. **Aadhaar number → one OTP.** The code goes to the mobile number UIDAI
    already has on file for that Aadhaar, so verifying it confirms two
    things at once: this is a real Aadhaar identity, and the applicant
    controls the phone linked to it. Large-tier loans add one more step
-   here: a selfie matched against the Aadhaar photo.
+   here: a selfie matched against the Aadhaar photo. This is mandatory at
+   this tier, not a skippable extra, so there is no "do this later" option
+   on any of the tier's live checks.
 3. **Persona**: Salaried, Self Employed, or Business Owner. Self Employed
    gets one follow-up (GST registration or not), since that decides how
    their business address gets confirmed later, not whether it does.
@@ -43,16 +48,26 @@ the friction.
    record, family-owned is taken as self-declared, rented sends an
    automated confirmation link to the landlord (no manual call, this is a
    self-serve yes/no, never a human phone call). Only on a large loan does
-   this add a live location-and-photo check on top, and only after the
-   ownership check itself has already passed.
+   this add a live check on top, and only after the ownership check itself
+   has already passed.
 7. **Office address** (Salaried) or **business address** (Business Owner,
-   or Self Employed with GST). Office address is validated in real time
-   like a maps lookup, a hard requirement regardless of loan size; EPFO and
-   salary-account matches are shown as background bonuses that never block
-   the outcome. Business address offers an explicit choice at any loan
-   size: a live shop photo, or upload GSTIN and business PAN instead.
-   Self Employed without GST skips this step entirely, the home address
-   result stands alone.
+   or Self Employed with GST). Office address is entered as separate
+   building, floor, and unit fields plus a pincode that auto-fills city
+   and state, then validated in real time like a maps lookup, a hard
+   requirement regardless of loan size; EPFO and salary-account matches
+   are shown as background bonuses that never block the outcome. Business
+   address is found automatically using the PAN already entered at the
+   credit-check step (a GSTIN is derived from its owner's PAN, so no
+   separate GSTIN entry is needed), then offers an explicit choice at any
+   loan size: a live shop photo, or confirm GSTIN and business PAN
+   instead. Self Employed without GST skips this step entirely, the home
+   address result stands alone.
+
+Every live check (selfie, home, office, business) takes two photos, rear
+camera on the place and front camera on the applicant with it visible
+behind them, plus location. Location is asked for once, the first time any
+check needs it, and silently reused for every check after that; it is
+never asked for a second time in the same application.
 
 There is no step that leans on telecom or bank KYC as a stand-in for an
 independent check: in India that KYC is itself mostly Aadhaar-derived, so
@@ -122,10 +137,10 @@ pre-baked scenario.
 - **Permission-free by design.** No `getUserMedia` or `geolocation` calls
   anywhere; location and camera steps are simulated timers so the demo
   never depends on what a browser or OS permission dialog does.
-- **Large-tier live checks explain themselves.** Every extra capture step
-  is framed as being about the loan amount, not a generic trust problem,
-  and offers a "do this later" save-and-resume path instead of forcing it
-  in the moment.
+- **Large-tier live checks are explained once, upfront.** The tier-notice
+  screen lists everything extra up front so no individual step needs to
+  re-justify itself; those checks are then mandatory, not skippable, so
+  there's no "do this later" escape hatch to maintain or exploit.
 - **Back navigation** is available anywhere it's safe to go back.
 
 ## Scope

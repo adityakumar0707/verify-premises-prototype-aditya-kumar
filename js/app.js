@@ -1,5 +1,5 @@
-import { TOGGLES, PROFILE, BANK_ACCOUNTS, BUSINESS_INFO, lookupPincode } from './mock-data.js';
-import { loanTier, checkHomeRecords, checkBusinessDocuments } from './engine.js';
+import { TOGGLES, PROFILE, BANK_ACCOUNTS, BUSINESS_INFO, lookupPincode, buildGstin } from './mock-data.js';
+import { loanTier, checkHomeRecords, checkBusinessDocuments, LOAN_TIER_THRESHOLD } from './engine.js';
 import { ICONS } from './icons.js';
 
 // ---- state -----------------------------------------------------------
@@ -17,9 +17,10 @@ const state = {
   homeSameAsAadhaar: null,
   homePincode: '', homeCity: '', homeState: '', homeAddressLine: '',
   homeOwnership: null,
-  officeAddress: '', officeValidating: false, officeValidated: false, officeError: '',
+  officeBuilding: '', officeFloor: '', officeUnit: '', officePincode: '', officeCity: '', officeState: '',
+  officeValidating: false, officeValidated: false,
   businessChoice: null, businessGstinInput: '', businessPanInput: '',
-  captureContext: null, geoLoading: false, geoConfirmed: false,
+  captureContext: null, captureShotIndex: 0, geoLoading: false, geoConfirmed: false,
   trace: [], retryTarget: null,
   traceOpen: false,
 };
@@ -29,43 +30,56 @@ const root = document.getElementById('screen-root');
 const topbarEl = document.getElementById('topbar');
 const phoneEl = document.querySelector('.phone');
 const needsGeo = (ctx) => ctx !== 'selfie';
+function formatINR(n) {
+  const s = String(Number(n));
+  if (s.length <= 3) return s;
+  const last3 = s.slice(-3);
+  const rest = s.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+  return `${rest},${last3}`;
+}
 
+// Each context takes two photos (rear camera on the place, front camera on
+// the applicant with it visible behind them) except a selfie, which is one
+// shot matched to the Aadhaar photo instead of a place.
 const CAPTURE_COPY = {
   selfie: {
-    introTitle: 'Quick identity check',
-    introBody: 'Because of your loan amount, we need one more check: a selfie matched against your Aadhaar photo. Takes a few seconds.',
-    cameraTitle: 'Take a selfie',
-    cameraBody: 'Look straight at the camera in good light.',
+    introTitle: 'Selfie match',
+    introBody: "We'll match this to your Aadhaar photo to confirm it's really you.",
+    shots: [
+      { title: 'Take a selfie', body: 'Look straight at the camera in good light.' },
+    ],
     failReason: 'Your selfie did not match your Aadhaar photo',
     successLabel: 'Selfie matched your Aadhaar photo',
-    allowResume: false,
   },
   home: {
-    introTitle: 'One more check for this loan amount',
-    introBody: "Because of the amount you're borrowing, we also need a live location and photo check for your home address. Takes about 30 seconds.",
-    cameraTitle: 'Show your door number',
-    cameraBody: 'Point your camera at your house number or door plate.',
+    introTitle: 'Home photos',
+    introBody: "We'll take two quick photos of your home, along with your location, to confirm you're genuinely there.",
+    shots: [
+      { title: 'Show your entrance', body: 'Use your rear camera. Point it at your house number or door.' },
+      { title: 'Show yourself at home', body: 'Switch to your front camera, with your home visible behind you.' },
+    ],
     failReason: 'Your live check did not confirm your home address',
     successLabel: 'Live check confirmed your home address',
-    allowResume: true,
   },
   office: {
-    introTitle: 'One more check for this loan amount',
-    introBody: "Because of the amount you're borrowing, we also need a live location and photo check for your office.",
-    cameraTitle: 'Show your office entrance or signage',
-    cameraBody: 'Point your camera at your office entrance, nameplate, or signage.',
+    introTitle: 'Office photos',
+    introBody: "We'll take two quick photos of your office, along with your location.",
+    shots: [
+      { title: 'Show your office entrance', body: 'Use your rear camera. Point it at the entrance, nameplate, or signage.' },
+      { title: 'Show yourself at the office', body: 'Switch to your front camera, with your office visible behind you.' },
+    ],
     failReason: 'Your office photo did not confirm the address',
     successLabel: 'Live photo confirmed your office address',
-    allowResume: true,
   },
   business: {
-    introTitle: 'Verify your shop',
-    introBody: "Take a live photo of your shop front so we can confirm the address. This replaces uploading documents.",
-    cameraTitle: 'Show your shop front',
-    cameraBody: "Point your camera at your shop's signage or entrance.",
+    introTitle: 'Shop photos',
+    introBody: "We'll take two quick photos of your shop, along with your location. This replaces uploading documents.",
+    shots: [
+      { title: 'Show your shop front', body: "Use your rear camera. Point it at your shop's signage or entrance." },
+      { title: 'Show yourself at the shop', body: 'Switch to your front camera, with your shop visible behind you.' },
+    ],
     failReason: 'Your shop photo did not confirm the address',
     successLabel: 'Live photo confirmed your shop address',
-    allowResume: true,
   },
 };
 
@@ -142,9 +156,10 @@ function resetFlow() {
     homeSameAsAadhaar: null,
     homePincode: '', homeCity: '', homeState: '', homeAddressLine: '',
     homeOwnership: null,
-    officeAddress: '', officeValidating: false, officeValidated: false, officeError: '',
+    officeBuilding: '', officeFloor: '', officeUnit: '', officePincode: '', officeCity: '', officeState: '',
+    officeValidating: false, officeValidated: false,
     businessChoice: null, businessGstinInput: '', businessPanInput: '',
-    captureContext: null, geoLoading: false, geoConfirmed: false,
+    captureContext: null, captureShotIndex: 0, geoLoading: false, geoConfirmed: false,
     trace: [], retryTarget: null, traceOpen: false,
   });
   render();
@@ -154,11 +169,11 @@ function resetFlow() {
 const STAGE_LABELS = ['', 'Identity', 'CIBIL & income', 'Home address', 'Office & business', 'Done'];
 const STATIC_STAGE_OF = {
   welcome: 0,
-  'loan-amount': 1, 'aadhaar-number': 1, 'aadhaar-otp': 1, persona: 1, 'gst-check': 1, 'email-verify': 1,
+  'loan-amount': 1, 'tier-notice': 1, 'aadhaar-number': 1, 'aadhaar-otp': 1, persona: 1, 'gst-check': 1, 'email-verify': 1,
   pan: 2, 'bureau-checking': 2, offer: 2, 'income-account': 2, 'income-docs-checking': 2,
   'home-same': 3, 'home-pincode': 3, 'home-ownership': 3, 'home-checking': 3,
   'office-address': 4, 'business-address': 4, 'business-documents': 4,
-  'outcome-clear': 5, 'outcome-decline': 5, 'support-stub': 5, 'resume-stub': 5,
+  'outcome-clear': 5, 'outcome-decline': 5, 'support-stub': 5,
 };
 const CAPTURE_STAGE = { selfie: 1, home: 3, office: 4, business: 4 };
 const NO_BACK = new Set(['welcome', 'bureau-checking', 'home-checking', 'income-docs-checking', 'capture-checking', 'outcome-clear', 'outcome-decline']);
@@ -315,14 +330,27 @@ const screens = {
     return `
       <span class="eyebrow">${ICONS.bank} Loan details</span>
       <h1 class="screen-title">How much would you like to borrow?</h1>
-      <p class="screen-sub">This decides which checks apply. Larger loans include one extra live check for your address.</p>
       <label for="loan-amount-input">Loan amount</label>
       <input id="loan-amount-input" type="text" inputmode="numeric" placeholder="e.g. 500000" value="${state.loanAmount}">
       <div class="chip-row">
         ${chips.map((c) => `<button type="button" class="chip" data-amount="${c}">₹${c / 100000}L</button>`).join('')}
       </div>
-      <div class="value-nudge">${ICONS.info} Loans of ₹5,00,000 or more include one extra live check for your address.</div>
+      <div class="value-nudge">${ICONS.info} Loans above ₹${formatINR(LOAN_TIER_THRESHOLD)} also require a live photo capture of your home, to confirm you actually live there.</div>
       <div class="btn-row"><button class="btn btn-primary" id="continue-loan-amount" ${Number(state.loanAmount) > 0 ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  'tier-notice'() {
+    return `
+      <span class="eyebrow">${ICONS.shield} Before we start</span>
+      <h1 class="screen-title">Since you're borrowing ₹${formatINR(state.loanAmount)}, we'll also ask for a few live photos</h1>
+      <p class="screen-sub">Each one confirms you're genuinely at the address you give us. We'll ask for these once, at the right point, nothing repeated.</p>
+      <div class="reassure-list">
+        <div class="reassure-item"><div class="reassure-icon">${ICONS.idcard}</div><div class="reassure-text"><div class="rt">A selfie</div><div class="rs">Matched against your Aadhaar photo</div></div></div>
+        <div class="reassure-item"><div class="reassure-icon">${ICONS.home}</div><div class="reassure-text"><div class="rt">Two photos of your home</div><div class="rs">Your entrance and yourself, plus your location</div></div></div>
+        <div class="reassure-item"><div class="reassure-icon">${ICONS.bank}</div><div class="reassure-text"><div class="rt">Two photos of your office or shop</div><div class="rs">Same as above, if that applies to you</div></div></div>
+      </div>
+      <div class="btn-row"><button class="btn btn-primary" id="continue-tier-notice">Continue</button></div>
     `;
   },
 
@@ -359,15 +387,11 @@ const screens = {
         <h1 class="screen-title">${c.introTitle}</h1>
         <p class="screen-sub">${c.introBody}</p>
         <div class="reassure-list">
-          <div class="reassure-item"><div class="reassure-icon">${ICONS.pin}</div><div class="reassure-text"><div class="rt">Used once</div><div class="rs">We check your location only for this step, nothing is tracked afterward.</div></div></div>
-          <div class="reassure-item"><div class="reassure-icon">${ICONS.lock}</div><div class="reassure-text"><div class="rt">Kept secure</div><div class="rs">Your photo is encrypted and used only to verify this application.</div></div></div>
+          <div class="reassure-item"><div class="reassure-icon">${ICONS.lock}</div><div class="reassure-text"><div class="rt">Kept secure</div><div class="rs">Encrypted and used only to verify this application.</div></div></div>
           <div class="reassure-item"><div class="reassure-icon">${ICONS.noVisit}</div><div class="reassure-text"><div class="rt">No one visits</div><div class="rs">This replaces an in-person visit for this step.</div></div></div>
         </div>
       </div>
-      <div class="btn-row">
-        <button class="btn btn-primary" id="capture-continue">Continue</button>
-        ${c.allowResume ? `<button class="link-btn muted" id="capture-later">Do this later instead</button>` : ''}
-      </div>
+      <div class="btn-row"><button class="btn btn-primary" id="capture-continue">Continue</button></div>
     `;
   },
 
@@ -375,28 +399,30 @@ const screens = {
     if (state.geoConfirmed) {
       return `
         <h1 class="screen-title">Location confirmed</h1>
-        <div class="geo-card"><div class="gi">${ICONS.pin}</div><div><div class="gt">You're in the right area</div><div class="gs">Confirmed just now, used once for this check</div></div></div>
+        <div class="geo-card"><div class="gi">${ICONS.pin}</div><div><div class="gt">You're in the right area</div><div class="gs">Confirmed just now</div></div></div>
         <div class="btn-row"><button class="btn btn-primary" id="geo-continue">Continue</button></div>
       `;
     }
     return `
       <div class="hero-icon">${ICONS.pin}</div>
       <h1 class="screen-title">Confirm your location</h1>
-      <p class="screen-sub">A one-time check against your address. Not continuous tracking, and never shared elsewhere.</p>
+      <p class="screen-sub">We'll only ask for this once, then reuse it for every photo in this application. Not continuous tracking, and never shared elsewhere.</p>
       <div class="btn-row"><button class="btn btn-primary" id="capture-geo-btn">${state.geoLoading ? '<span class="spin"></span>' : 'Share location'}</button></div>
     `;
   },
 
   'capture-camera'() {
     const c = CAPTURE_COPY[state.captureContext];
+    const shot = c.shots[state.captureShotIndex];
+    const multi = c.shots.length > 1;
     return `
-      <h1 class="screen-title">${c.cameraTitle}</h1>
-      <p class="screen-sub">${c.cameraBody}</p>
+      <h1 class="screen-title">${shot.title}</h1>
+      <p class="screen-sub">${shot.body}</p>
       <div class="camera-illustration" id="camera-view">
         <div class="ci-icon">${ICONS.camera}</div>
         <div class="guidance-pill" id="guidance-pill"><span class="guidance-dot"></span><span id="guidance-text">Position it in the frame</span></div>
       </div>
-      <div class="btn-row"><button class="btn btn-primary" id="capture-photo" disabled>Take photo</button></div>
+      <div class="btn-row"><button class="btn btn-primary" id="capture-photo" disabled>${multi ? `Capture (${state.captureShotIndex + 1}/${c.shots.length})` : 'Take photo'}</button></div>
     `;
   },
 
@@ -566,13 +592,21 @@ const screens = {
   },
 
   'office-address'() {
+    const showCityState = state.officePincode.replace(/\D/g, '').length === 6;
+    const canValidate = state.officeBuilding.trim() && state.officeFloor.trim() && state.officeUnit.trim() && showCityState;
     return `
       <span class="eyebrow">${ICONS.bank} Office address</span>
       <h1 class="screen-title">What's your office address?</h1>
       <p class="screen-sub">We'll validate this in real time, like checking it on a map.</p>
-      <label for="office-address-input">Office address</label>
-      <textarea id="office-address-input" rows="3" placeholder="Building, street, locality, city">${state.officeAddress}</textarea>
-      ${state.officeError ? `<div class="field-error">${state.officeError}</div>` : ''}
+      <label for="office-building-input">Building name</label>
+      <input id="office-building-input" type="text" placeholder="e.g. Cyber Towers" value="${state.officeBuilding}">
+      <label for="office-floor-input">Floor</label>
+      <input id="office-floor-input" type="text" placeholder="e.g. 4th Floor" value="${state.officeFloor}">
+      <label for="office-unit-input">Office / unit number</label>
+      <input id="office-unit-input" type="text" placeholder="e.g. Suite 402" value="${state.officeUnit}">
+      <label for="office-pincode-input">Pincode</label>
+      <input id="office-pincode-input" type="text" inputmode="numeric" maxlength="6" placeholder="e.g. 500081" value="${state.officePincode}">
+      ${showCityState ? `<div class="value-nudge">${ICONS.pin} ${state.officeCity}, ${state.officeState}</div>` : ''}
       ${state.officeValidated ? `
         <div class="geo-card"><div class="gi">${ICONS.check}</div><div><div class="gt">Address validated</div><div class="gs">Matches a real location on the map</div></div></div>
         <div class="recovery-card tint-brand">
@@ -581,16 +615,17 @@ const screens = {
         </div>
       ` : ''}
       <div class="btn-row">
-        <button class="btn btn-primary" id="${state.officeValidated ? 'continue-office' : 'validate-office'}">${state.officeValidating ? '<span class="spin"></span>' : (state.officeValidated ? 'Continue' : 'Validate address')}</button>
+        <button class="btn btn-primary" id="${state.officeValidated ? 'continue-office' : 'validate-office'}" ${state.officeValidated || canValidate ? '' : 'disabled'}>${state.officeValidating ? '<span class="spin"></span>' : (state.officeValidated ? 'Continue' : 'Validate address')}</button>
       </div>
     `;
   },
 
   'business-address'() {
+    const gstin = buildGstin(state.pan);
     return `
       <span class="eyebrow">${ICONS.shop} Business address</span>
       <h1 class="screen-title">Let's confirm your business address</h1>
-      <div class="geo-card"><div class="gi">${ICONS.doc}</div><div><div class="gt">${BUSINESS_INFO.legalName}</div><div class="gs">GSTIN ${BUSINESS_INFO.gstin}, found automatically</div></div></div>
+      <div class="geo-card"><div class="gi">${ICONS.doc}</div><div><div class="gt">${BUSINESS_INFO.legalName}</div><div class="gs">GSTIN ${gstin}, found using your PAN</div></div></div>
       <p class="screen-sub">Confirm this address with a live photo of your shop, or upload your GSTIN and business PAN instead.</p>
       <div class="radio-card ${state.businessChoice === 'photo' ? 'selected' : ''}" data-bizchoice="photo">
         <div class="dot"></div><div><div class="rt">Take a live shop photo</div><div class="rs">Quickest, confirms the address right away</div></div>
@@ -645,17 +680,6 @@ const screens = {
       <div class="btn-row"><button class="btn btn-secondary" id="restart">Start over</button></div>
     `;
   },
-
-  'resume-stub'() {
-    return `
-      <div class="center" style="margin:auto 0;">
-        <div class="hero-icon">${ICONS.link}</div>
-        <h1 class="screen-title">We'll save your progress</h1>
-        <p class="screen-sub">In the full product we'd text and email you a secure link to finish this step whenever you're ready. Everything you've done so far stays saved.</p>
-      </div>
-      <div class="btn-row"><button class="btn btn-primary" id="resume-continue-now">Actually, continue now</button></div>
-    `;
-  },
 };
 
 function outcomeMarkup({ tone, headline, sub, cta, celebrate, ctaAction, secondaryCta }) {
@@ -702,8 +726,12 @@ function wireEvents() {
     }));
     document.getElementById('continue-loan-amount')?.addEventListener('click', () => {
       state.tier = loanTier(Number(state.loanAmount));
-      goto('aadhaar-number');
+      goto(state.tier === 'large' ? 'tier-notice' : 'aadhaar-number');
     });
+  }
+
+  if (state.screen === 'tier-notice') {
+    document.getElementById('continue-tier-notice')?.addEventListener('click', () => goto('aadhaar-number'));
   }
 
   if (state.screen === 'aadhaar-number') {
@@ -730,9 +758,9 @@ function wireEvents() {
 
   if (state.screen === 'capture-intro') {
     document.getElementById('capture-continue')?.addEventListener('click', () => {
-      goto(needsGeo(state.captureContext) ? 'capture-geo' : 'capture-camera');
+      state.captureShotIndex = 0;
+      goto(needsGeo(state.captureContext) && !state.geoConfirmed ? 'capture-geo' : 'capture-camera');
     });
-    document.getElementById('capture-later')?.addEventListener('click', () => goto('resume-stub'));
   }
   if (state.screen === 'capture-geo') {
     document.getElementById('capture-geo-btn')?.addEventListener('click', async () => {
@@ -740,10 +768,7 @@ function wireEvents() {
       await sleep(800);
       state.geoLoading = false; state.geoConfirmed = true; render();
     });
-    document.getElementById('geo-continue')?.addEventListener('click', () => {
-      state.geoConfirmed = false;
-      goto('capture-camera');
-    });
+    document.getElementById('geo-continue')?.addEventListener('click', () => goto('capture-camera'));
   }
   if (state.screen === 'capture-camera') runCameraGuidance();
   if (state.screen === 'capture-checking') runCaptureCheck();
@@ -832,18 +857,29 @@ function wireEvents() {
   if (state.screen === 'home-checking') runHomeCheck();
 
   if (state.screen === 'office-address') {
-    bindInput('office-address-input', { onChange: (v) => { state.officeAddress = v; state.officeValidated = false; } });
+    const canValidate = () => state.officeBuilding.trim() && state.officeFloor.trim() && state.officeUnit.trim() && state.officePincode.replace(/\D/g, '').length === 6;
+    bindInput('office-building-input', { onChange: (v) => { state.officeBuilding = v; state.officeValidated = false; }, buttonId: 'validate-office', isValid: canValidate });
+    bindInput('office-floor-input', { onChange: (v) => { state.officeFloor = v; state.officeValidated = false; }, buttonId: 'validate-office', isValid: canValidate });
+    bindInput('office-unit-input', { onChange: (v) => { state.officeUnit = v; state.officeValidated = false; }, buttonId: 'validate-office', isValid: canValidate });
+    bindInput('office-pincode-input', {
+      transform: (v) => v.replace(/\D/g, '').slice(0, 6),
+      onChange: (v) => {
+        state.officePincode = v; state.officeValidated = false;
+        if (v.length === 6) {
+          const loc = lookupPincode(v);
+          state.officeCity = loc.city; state.officeState = loc.state;
+          render();
+        }
+      },
+      buttonId: 'validate-office', isValid: canValidate,
+    });
     document.getElementById('validate-office')?.addEventListener('click', async () => {
-      state.officeValidating = true; state.officeError = ''; render();
+      state.officeValidating = true; render();
       await sleep(700);
       state.officeValidating = false;
-      if (state.officeAddress.trim().length >= 8) {
-        state.officeValidated = true;
-        pushTrace('Office address validated');
-        if (state.toggles.epfoAvailable) pushTrace('EPFO record and salary account match employer (bonus)');
-      } else {
-        state.officeError = "We couldn't locate this address. Please add more detail (building, street, locality) and try again.";
-      }
+      state.officeValidated = true;
+      pushTrace('Office address validated');
+      if (state.toggles.epfoAvailable) pushTrace('EPFO record and salary account match employer (bonus)');
       render();
     });
     document.getElementById('continue-office')?.addEventListener('click', () => {
@@ -855,9 +891,14 @@ function wireEvents() {
   if (state.screen === 'business-address') {
     root.querySelectorAll('[data-bizchoice]').forEach((el) => el.addEventListener('click', () => { state.businessChoice = el.dataset.bizchoice; render(); }));
     document.getElementById('continue-business-choice')?.addEventListener('click', () => {
-      pushTrace(`Business found: ${BUSINESS_INFO.legalName} (GSTIN ${BUSINESS_INFO.gstin})`);
+      const gstin = buildGstin(state.pan);
+      pushTrace(`Business found using your PAN: ${BUSINESS_INFO.legalName} (GSTIN ${gstin})`);
       if (state.businessChoice === 'photo') { state.captureContext = 'business'; goto('capture-intro'); }
-      else goto('business-documents');
+      else {
+        state.businessGstinInput = state.businessGstinInput || gstin;
+        state.businessPanInput = state.businessPanInput || state.pan;
+        goto('business-documents');
+      }
     });
   }
 
@@ -887,17 +928,13 @@ function wireEvents() {
       const action = e.currentTarget.dataset.action;
       if (action === 'retry' && state.retryTarget) {
         state.trace = state.trace.filter((t) => t.ok);
+        if (state.retryTarget === 'capture-camera') state.captureShotIndex = 0;
         goto(state.retryTarget);
       } else resetFlow();
     });
     document.getElementById('outcome-secondary')?.addEventListener('click', () => goto('support-stub'));
   }
   if (state.screen === 'support-stub') document.getElementById('restart')?.addEventListener('click', resetFlow);
-  if (state.screen === 'resume-stub') {
-    document.getElementById('resume-continue-now')?.addEventListener('click', () => {
-      goto(needsGeo(state.captureContext) ? 'capture-geo' : 'capture-camera');
-    });
-  }
 }
 
 async function verifyAadhaarOtp() {
@@ -918,12 +955,20 @@ async function runCameraGuidance() {
   const pillText = document.getElementById('guidance-text');
   const view = document.getElementById('camera-view');
   const btn = document.getElementById('capture-photo');
-  await sleep(1400);
+  await sleep(1200);
   view.classList.add('ready');
   pill.classList.add('ready');
   pillText.textContent = 'Looks good';
   btn.disabled = false;
-  btn.addEventListener('click', () => goto('capture-checking'), { once: true });
+  btn.addEventListener('click', () => {
+    const shots = CAPTURE_COPY[state.captureContext].shots;
+    if (state.captureShotIndex < shots.length - 1) {
+      state.captureShotIndex++;
+      render();
+    } else {
+      goto('capture-checking');
+    }
+  }, { once: true });
 }
 
 async function animateChecklist(listEl, steps) {
@@ -945,13 +990,13 @@ async function runCaptureCheck() {
   const ok = state.toggles.captureOk;
   const steps = ctx === 'selfie'
     ? [{ name: 'Confirming this is a live, genuine selfie', ok }, { name: 'Matching your face to your Aadhaar photo', ok }]
-    : [{ name: 'Confirming this is a live, genuine photo', ok }, { name: 'Matching your location', ok }, { name: 'Reading the signage or number', ok }];
+    : [{ name: 'Confirming both photos are live and genuine', ok }, { name: 'Matching your location', ok }, { name: 'Reading the signage or number', ok }];
   await animateChecklist(document.getElementById('capture-check-list'), steps);
   if (ok) {
     pushTrace(CAPTURE_COPY[ctx].successLabel);
     afterCaptureCleared();
   } else {
-    declineNow(CAPTURE_COPY[ctx].failReason, needsGeo(ctx) ? 'capture-geo' : 'capture-camera');
+    declineNow(CAPTURE_COPY[ctx].failReason, 'capture-camera');
   }
 }
 

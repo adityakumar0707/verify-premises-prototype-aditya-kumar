@@ -20,8 +20,14 @@ export const BANK_ACCOUNTS = [
 
 export const BUSINESS_INFO = {
   legalName: 'Kumar Retail Enterprises',
-  gstin: '07ABCDE1234F1Z5',
 };
+
+// A business's GSTIN is derived from its PAN (positions 3-12 are the PAN
+// itself), so once we already have the applicant's PAN from the credit
+// check, their GSTIN can be looked up rather than asked for again.
+export function buildGstin(pan) {
+  return `07${pan}1Z5`;
+}
 
 export const PINCODES = {
   '110078': { city: 'New Delhi', state: 'Delhi' },
