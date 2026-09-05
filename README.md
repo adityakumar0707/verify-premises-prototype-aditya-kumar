@@ -1,9 +1,9 @@
-# Loans24 — Premises Verification Prototype
+# Loans24 — Verification Prototype
 
-Clickable prototype of the Residential-premises verification flow. Plain
-HTML/CSS/JS, no build step, no framework, and fully simulated: no camera or
-location permission is ever requested, so it never blocks on a browser or
-OS prompt.
+Clickable prototype of the full loan-verification flow: identity, CIBIL and
+income, home address, and office or business address. Plain HTML/CSS/JS, no
+build step, no framework, and fully simulated: no camera or location
+permission is ever requested, so it never blocks on a browser or OS prompt.
 
 ## Run it
 
@@ -13,91 +13,123 @@ python3 -m http.server 4173
 
 Open `http://localhost:4173`.
 
-## The flow, and why it's ordered this way
+## Why the flow is built this way
 
-1. **Aadhaar number → one OTP.** The code goes to the mobile number UIDAI
+The whole design turns on one asymmetry: some facts about an applicant have
+a genuinely independent government or registry record behind them, and some
+don't. Where one exists, we check it automatically and never ask for a
+live photo. Where it doesn't, only a live check can actually confirm
+presence, so we ask for exactly one, and only when the loan size justifies
+the friction.
+
+1. **Loan amount, first.** Everything downstream (whether a live capture is
+   ever asked for at all) depends on this, so we ask before anything else.
+   ₹5,00,000 or more is the "large" tier.
+2. **Aadhaar number → one OTP.** The code goes to the mobile number UIDAI
    already has on file for that Aadhaar, so verifying it confirms two
    things at once: this is a real Aadhaar identity, and the applicant
-   controls the phone linked to it. No separate "enter and verify a mobile
-   number" step.
-2. **Work classification** (Employed / Shop owner / Self-employed) right
-   after identity, before anything else needs it.
-3. **Email verification**, personal always and office email too if
-   Employed, each with its own inline verify-by-OTP control on one screen.
-   Office email is mandatory for that persona, not skippable: it's the
-   contact channel that stays reachable if the home address stops being
-   accurate.
-4. **PAN** for the eligibility/bureau pull.
-5. **Profile confirmation**: permanent address comes directly from
-   Aadhaar (fetched once, not re-verified against itself later). A
-   same-as-permanent checkbox asks the one question Aadhaar can't answer
-   on its own — do you still live there — and reveals an editable current
-   address when unchecked.
-6. **Live capture, mandatory for everyone.** A verified identity and
-   verified contact details establish who someone is and how to reach
-   them; neither proves where they currently live or work, so a live
-   location + photo check always runs, never conditionally skipped.
+   controls the phone linked to it. Large-tier loans add one more step
+   here: a selfie matched against the Aadhaar photo.
+3. **Persona**: Salaried, Self Employed, or Business Owner. Self Employed
+   gets one follow-up (GST registration or not), since that decides how
+   their business address gets confirmed later, not whether it does.
+4. **Email verification**: personal always, office email too if Salaried,
+   each with its own inline verify-by-OTP control.
+5. **CIBIL and income**: a soft PAN pull, then pick which linked bank
+   account your income settles into. Self Employed and Business Owner
+   personas add one more automatic pull (IT returns or GST returns).
+6. **Home address.** Same-as-Aadhaar or not (pincode-autofill if not), then
+   how you hold it: self-owned checks against a government property
+   record, family-owned is taken as self-declared, rented sends an
+   automated confirmation link to the landlord (no manual call, this is a
+   self-serve yes/no, never a human phone call). Only on a large loan does
+   this add a live location-and-photo check on top, and only after the
+   ownership check itself has already passed.
+7. **Office address** (Salaried) or **business address** (Business Owner,
+   or Self Employed with GST). Office address is validated in real time
+   like a maps lookup, a hard requirement regardless of loan size; EPFO and
+   salary-account matches are shown as background bonuses that never block
+   the outcome. Business address offers an explicit choice at any loan
+   size: a live shop photo, or upload GSTIN and business PAN instead.
+   Self Employed without GST skips this step entirely, the home address
+   result stands alone.
 
-There is no separate corroboration source (no telecom-KYC-style lookup)
-standing in for that last step — capture is the proof, not a fallback for
-when something else couldn't provide it.
+There is no step that leans on telecom or bank KYC as a stand-in for an
+independent check: in India that KYC is itself mostly Aadhaar-derived, so
+it would just be re-confirming the same fact rather than a second,
+independent one.
 
 ## What's real vs. mocked
 
 | Real | Mocked |
 |---|---|
-| Screen flow, state machine, routing logic | Aadhaar / bureau lookups (`js/mock-data.js`) |
-| Decision logic for the capture verdict (`js/engine.js`) | The capture verdict itself (geofence/liveness/OCR are simulated, scenario-driven) |
+| Screen flow, state machine, routing logic | Aadhaar / bureau / registry lookups (`js/mock-data.js`) |
+| Decision logic for every check (`js/engine.js`) | The check outcomes themselves (reviewer-controlled toggles) |
 | Inline per-field email OTP verification UI | Actual email/SMS delivery |
+| Real-time office-address validation UX | The actual maps/geocoding lookup |
 
 ## Files
 
-- `js/engine.js` — the one real decision: did live capture confirm the
-  applicant is genuinely at the declared premises. Everything else is UI
-  around it.
-- `js/mock-data.js` — three demo scenarios standing in for Aadhaar/bureau
-  responses.
+- `js/engine.js` — the decision rules: loan tiering, and the one fact each
+  address check turns on (a property record, a landlord's confirmation,
+  uploaded registration documents). Sequencing lives in `app.js`, this file
+  only answers pass or fail for a given fact.
+- `js/mock-data.js` — profile, bank accounts, business registry, pincode
+  lookup, and the five background-check toggles.
 - `js/app.js` — screens, state, and the input-handling pattern (see below).
 - `js/icons.js` — small hand-drawn icon set (no external icon library).
 - `css/styles.css`, `index.html` — presentation shell.
 
-## A bug worth documenting
+## Demo controls
 
-Text inputs kept losing focus mid-keystroke, forcing a re-tap between
-characters. Root cause: the OTP resend countdown called a full re-render
-every second, which recreates the input's DOM node while the user might be
-mid-keystroke. Fixed by never calling `render()` from anything that can
-fire while an input might have focus — `bindInput()` updates state and
-toggles button state directly against existing DOM nodes, and the resend
-timer mutates its own button's text directly instead of re-rendering the
-screen. Covered by a test that types with 900ms gaps specifically to cross
-multiple timer ticks mid-entry, since fast automated typing never
-exercised the collision.
+The panel in the top corner holds five toggles standing in for backend
+checks a real server would run, all defaulting to true so the default
+click-through is a full happy path:
+
+- Property record matches (self-owned homes)
+- Landlord confirms tenancy (rented homes)
+- Live capture succeeds (shared by every live check: selfie, home, office,
+  business)
+- GSTIN + business PAN valid (the document-upload path for business
+  address)
+- EPFO record available (office-address bonus line, never gates anything)
+
+Everything else, loan amount, persona, ownership, the shop-photo-vs-
+documents choice, comes from real interaction with the UI, not a
+pre-baked scenario.
+
+## Bugs worth documenting
+
+- **OTP input losing focus mid-keystroke.** Root cause: the OTP resend
+  countdown called a full re-render every second, recreating the input's
+  DOM node while the user might be mid-keystroke. Fixed by never calling
+  `render()` from anything that can fire while an input might have focus:
+  `bindInput()` updates state and toggles button state directly against
+  existing DOM nodes, and the resend timer mutates its own button's text
+  directly instead of re-rendering the screen. Covered by a test that
+  types with 900ms gaps specifically to cross multiple timer ticks
+  mid-entry, since fast automated typing never exercised the collision.
+- **Checklist rows invisible.** `.check-row` (used by every animated
+  checklist: bureau, home-ownership, capture, and the office-address bonus
+  panel) referenced a `row-in` animation that was never defined anywhere
+  in the stylesheet, so every row sat at `opacity:0` permanently. Fixed by
+  adding the missing keyframe.
 
 ## UX choices worth noting
 
-- **Nothing is a dead end.** A decline always offers a real next step,
-  retry the live check or reach support, never just "start over."
+- **Nothing is a dead end.** A decline always offers a real next step:
+  retry with a corrected answer, or reach support.
 - **Permission-free by design.** No `getUserMedia` or `geolocation` calls
-  anywhere; the location and camera steps are simulated timers so the demo
+  anywhere; location and camera steps are simulated timers so the demo
   never depends on what a browser or OS permission dialog does.
-- **The capture step gives live feedback** (simulated) instead of a
-  silent shutter button.
+- **Large-tier live checks explain themselves.** Every extra capture step
+  is framed as being about the loan amount, not a generic trust problem,
+  and offers a "do this later" save-and-resume path instead of forcing it
+  in the moment.
 - **Back navigation** is available anywhere it's safe to go back.
-
-## Demo scenarios
-
-Switch scenarios from the picker in the top-right (reload triggered
-automatically):
-
-- **Has not moved, capture succeeds** → Clear
-- **Just moved, capture succeeds** → Clear (exercises the current-address
-  edit path)
-- **Capture not confirmed** → Decline, with a working retry and a support
-  path
 
 ## Scope
 
-Residential premises type only (Employed, Self-employed-without-
-storefront) — the Business/storefront path is a deliberate stub. No
-localization.
+No localization. The business-registry pull (GSTIN/Udyam) and the
+property-record and EPFO lookups are simulated as always finding a
+record; only the pass/fail outcome downstream of them is toggle-driven.

@@ -23,6 +23,10 @@ export const ICONS = {
   phone: svg('<rect x="7" y="2" width="10" height="20" rx="2.5"/><line x1="11" y1="18" x2="13" y2="18" stroke-width="2.4"/>'),
   headset: svg('<path d="M4 13a8 8 0 0 1 16 0"/><rect x="3" y="13" width="4" height="6" rx="1.5"/><rect x="17" y="13" width="4" height="6" rx="1.5"/><path d="M20 19v1a3 3 0 0 1-3 3h-3"/>'),
   idcard: svg('<rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="8.5" cy="11" r="2"/><path d="M6 16.5c0-1.4 1.1-2.5 2.5-2.5S11 15.1 11 16.5"/><line x1="13.5" y1="9.5" x2="18" y2="9.5"/><line x1="13.5" y1="13" x2="18" y2="13"/>'),
+  doc: svg('<path d="M7 3h7l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M14 3v4h4"/><line x1="8.5" y1="12" x2="15.5" y2="12"/><line x1="8.5" y1="15.5" x2="15.5" y2="15.5"/>'),
+  shop: svg('<path d="M4 9 5 4h14l1 5"/><path d="M4 9a2 2 0 0 0 4 0 2 2 0 0 0 4 0 2 2 0 0 0 4 0 2 2 0 0 0 4 0"/><path d="M5 9v10h14V9"/><path d="M10 19v-5h4v5"/>'),
+  chart: svg('<path d="M4 20V10M12 20V4M20 20v-7"/>'),
+  link: svg('<path d="M9 15 15 9"/><path d="M11 6l1.5-1.5a4 4 0 0 1 5.7 5.7L16.5 12"/><path d="M13 18l-1.5 1.5a4 4 0 0 1-5.7-5.7L7.5 12"/>'),
 };
 
 export const icon = (name, cls = '') => `<span class="${cls}">${ICONS[name] || ''}</span>`;

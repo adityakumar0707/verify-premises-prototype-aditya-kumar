@@ -1,20 +1,42 @@
-// engine.js — the one decision that matters: did live capture confirm the
-// applicant is genuinely, currently at the declared premises. Verified
-// identity (Aadhaar) and verified contact details (email) establish who
-// someone is and how to reach them; neither proves where they currently
-// live or work, so this is never skipped, only ever pass or fail.
+// engine.js — the decision rules from the Verification Menu. Loan amount
+// sets the tier, which decides whether a live capture is ever asked for at
+// all. Everything else here is a single fact check (a government record, a
+// landlord's confirmation, uploaded registration documents). Sequencing,
+// meaning which checks run in what order and what a live capture on top of
+// them means, is the app's job, not this module's: this file only answers
+// "given this fact, does it pass."
 
-export function routeFromCapture({ geofenceOk, ocrLivenessOk, mockLocationFlag }) {
-  if (mockLocationFlag) {
-    return { lane: 'decline', reason: 'device-integrity check flagged a mock or spoofed location provider' };
+export const LOAN_TIER_THRESHOLD = 500000;
+
+export function loanTier(amount) {
+  return amount >= LOAN_TIER_THRESHOLD ? 'large' : 'small';
+}
+
+export function checkHomeRecords({ ownership, selfOwnedMatch, landlordConfirmed }) {
+  if (ownership === 'self') {
+    return {
+      ok: true,
+      reason: selfOwnedMatch
+        ? 'Ownership confirmed by a government property record'
+        : 'No matching property record found, taken as self-declared',
+    };
   }
-  if (geofenceOk && ocrLivenessOk) {
-    return { lane: 'clear', reason: 'live capture confirms presence at the declared premises' };
+  if (ownership === 'family') {
+    return { ok: true, reason: 'Family-owned, taken as self-declared' };
   }
   return {
-    lane: 'decline',
-    reason: !geofenceOk
-      ? 'captured location falls outside the declared address radius'
-      : "capture didn't pass the OCR/liveness check",
+    ok: landlordConfirmed,
+    reason: landlordConfirmed
+      ? 'Your landlord confirmed the tenancy'
+      : 'Your landlord did not confirm the tenancy',
+  };
+}
+
+export function checkBusinessDocuments(gstinPanValid) {
+  return {
+    ok: gstinPanValid,
+    reason: gstinPanValid
+      ? 'Confirmed with your GSTIN and business PAN'
+      : 'We could not confirm your business registration details',
   };
 }

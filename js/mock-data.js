@@ -1,48 +1,46 @@
-// mock-data.js — fixtures standing in for real Aadhaar/bureau calls.
-// Aadhaar is the single identity anchor: its OTP goes to the mobile number
-// UIDAI already has on file, so verifying it confirms both who the
-// applicant is and that they control the linked phone, in one step. There
-// is no separate corroboration source to compare against; live capture is
-// mandatory for everyone and is the only thing that can confirm current
-// physical premises.
+// mock-data.js — stand-ins for backend calls. The toggles are the only
+// scripted part of this demo: loan amount, persona, ownership, and the
+// shop-photo-vs-documents choice all come from real interaction with the
+// UI, not a pre-baked scenario. The toggles decide how the background
+// checks a real server would run happen to come back, and default to a
+// full happy path.
 
-export const DEMO_SCENARIOS = {
-  verified: {
-    label: 'Has not moved, capture succeeds',
-    expect: 'Clear',
-    profile: {
-      name: 'Ramesh Kumar', dob: '14/08/1992', pan: 'ABCDE1234F',
-      aadhaarNumber: '4321 9876 5012', linkedMobileLast4: '5980',
-      permanentAddress: 'Flat 302, Green Valley Apartments, Sector 70, Gurugram',
-    },
-    currentSameAsPermanentDefault: true,
-    currentAddressSuggestion: '',
-    capture: { ok: true },
-  },
-  moved: {
-    label: 'Just moved, capture succeeds',
-    expect: 'Clear',
-    profile: {
-      name: 'Priya Sharma', dob: '02/11/1998', pan: 'PQRSX5678K',
-      aadhaarNumber: '5566 7788 9900', linkedMobileLast4: '4412',
-      permanentAddress: 'C-14 Nehru Nagar, Bhopal',
-    },
-    currentSameAsPermanentDefault: false,
-    currentAddressSuggestion: '14 Lake View Colony, Kothrud, Pune',
-    capture: { ok: true },
-  },
-  capture_fail: {
-    label: 'Capture not confirmed',
-    expect: 'Decline, retry available',
-    profile: {
-      name: 'Arjun Nair', dob: '05/07/1995', pan: 'WXYZC8765R',
-      aadhaarNumber: '9988 7766 5544', linkedMobileLast4: '3307',
-      permanentAddress: '31 Marine Drive, Kochi',
-    },
-    currentSameAsPermanentDefault: false,
-    currentAddressSuggestion: '77 Palm Grove, Kochi',
-    capture: { ok: false },
-  },
+export const PROFILE = {
+  name: 'Ramesh Kumar',
+  dob: '14 Mar 1990',
+  linkedMobileLast4: '8980',
+  aadhaarAddress: 'Flat 4B, Green Meadows Apartments, Sector 12, Dwarka, New Delhi, 110078',
 };
 
-export const BUREAU_LATENCY_MS = 900;
+export const BANK_ACCOUNTS = [
+  { id: 'hdfc', label: 'HDFC Bank •••• 4521' },
+  { id: 'icici', label: 'ICICI Bank •••• 7789' },
+  { id: 'sbi', label: 'SBI •••• 1132' },
+];
+
+export const BUSINESS_INFO = {
+  legalName: 'Kumar Retail Enterprises',
+  gstin: '07ABCDE1234F1Z5',
+};
+
+export const PINCODES = {
+  '110078': { city: 'New Delhi', state: 'Delhi' },
+  '400001': { city: 'Mumbai', state: 'Maharashtra' },
+  '560001': { city: 'Bengaluru', state: 'Karnataka' },
+  '700001': { city: 'Kolkata', state: 'West Bengal' },
+  '600001': { city: 'Chennai', state: 'Tamil Nadu' },
+};
+export function lookupPincode(pin) {
+  return PINCODES[pin] || { city: 'Pune', state: 'Maharashtra' };
+}
+
+// Background-check toggles, reviewer-controlled from the demo panel.
+// Default to true so the default click-through is a full happy path;
+// flip one to see how that path declines.
+export const TOGGLES = {
+  selfOwnedMatch: true,
+  landlordConfirmed: true,
+  captureOk: true,
+  gstinPanValid: true,
+  epfoAvailable: true,
+};

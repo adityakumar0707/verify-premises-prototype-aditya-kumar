@@ -1,33 +1,75 @@
-import { DEMO_SCENARIOS, BUREAU_LATENCY_MS } from './mock-data.js';
-import { routeFromCapture } from './engine.js';
+import { TOGGLES, PROFILE, BANK_ACCOUNTS, BUSINESS_INFO, lookupPincode } from './mock-data.js';
+import { loanTier, checkHomeRecords, checkBusinessDocuments } from './engine.js';
 import { ICONS } from './icons.js';
 
 // ---- state -----------------------------------------------------------
 const state = {
   screen: 'welcome',
   history: [],
-  scenarioKey: 'verified',
+  toggles: { ...TOGGLES },
+  loanAmount: '', tier: null,
   aadhaarNumber: '', aadhaarOtp: '', aadhaarVerifying: false, resendIn: 0, resendTimer: null,
-  setupType: null,
+  persona: null, hasGst: null,
   personalEmail: { value: '', otpSent: false, otp: '', verifying: false, verified: false },
   workEmail: { value: '', otpSent: false, otp: '', verifying: false, verified: false },
-  pan: '',
-  currentSameAsPermanent: true, currentAddressDraft: '',
-  editingPermanent: false, permanentAddressDraft: '', permanentAddressOverride: null,
-  geoLoading: false, geoConfirmed: false,
-  captureVerdict: null, captureRouteDecision: null,
+  pan: '', cibilScore: null,
+  incomeAccount: null,
+  homeSameAsAadhaar: null,
+  homePincode: '', homeCity: '', homeState: '', homeAddressLine: '',
+  homeOwnership: null,
+  officeAddress: '', officeValidating: false, officeValidated: false, officeError: '',
+  businessChoice: null, businessGstinInput: '', businessPanInput: '',
+  captureContext: null, geoLoading: false, geoConfirmed: false,
+  trace: [], retryTarget: null,
   traceOpen: false,
 };
 
-const scenario = () => DEMO_SCENARIOS[state.scenarioKey];
-const permanentAddress = () => state.permanentAddressOverride ?? scenario().profile.permanentAddress;
-const declaredAddress = () => (state.currentSameAsPermanent ? permanentAddress() : state.currentAddressDraft);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const root = document.getElementById('screen-root');
 const topbarEl = document.getElementById('topbar');
 const phoneEl = document.querySelector('.phone');
+const needsGeo = (ctx) => ctx !== 'selfie';
 
-const TRANSIENT = new Set(['bureau-loading', 'checking', 'capture-checking']);
+const CAPTURE_COPY = {
+  selfie: {
+    introTitle: 'Quick identity check',
+    introBody: 'Because of your loan amount, we need one more check: a selfie matched against your Aadhaar photo. Takes a few seconds.',
+    cameraTitle: 'Take a selfie',
+    cameraBody: 'Look straight at the camera in good light.',
+    failReason: 'Your selfie did not match your Aadhaar photo',
+    successLabel: 'Selfie matched your Aadhaar photo',
+    allowResume: false,
+  },
+  home: {
+    introTitle: 'One more check for this loan amount',
+    introBody: "Because of the amount you're borrowing, we also need a live location and photo check for your home address. Takes about 30 seconds.",
+    cameraTitle: 'Show your door number',
+    cameraBody: 'Point your camera at your house number or door plate.',
+    failReason: 'Your live check did not confirm your home address',
+    successLabel: 'Live check confirmed your home address',
+    allowResume: true,
+  },
+  office: {
+    introTitle: 'One more check for this loan amount',
+    introBody: "Because of the amount you're borrowing, we also need a live location and photo check for your office.",
+    cameraTitle: 'Show your office entrance or signage',
+    cameraBody: 'Point your camera at your office entrance, nameplate, or signage.',
+    failReason: 'Your office photo did not confirm the address',
+    successLabel: 'Live photo confirmed your office address',
+    allowResume: true,
+  },
+  business: {
+    introTitle: 'Verify your shop',
+    introBody: "Take a live photo of your shop front so we can confirm the address. This replaces uploading documents.",
+    cameraTitle: 'Show your shop front',
+    cameraBody: "Point your camera at your shop's signage or entrance.",
+    failReason: 'Your shop photo did not confirm the address',
+    successLabel: 'Live photo confirmed your shop address',
+    allowResume: true,
+  },
+};
+
+const TRANSIENT = new Set(['bureau-checking', 'home-checking', 'income-docs-checking', 'capture-checking']);
 
 function goto(screen, { replace = false } = {}) {
   if (!replace && state.screen !== screen) state.history.push(state.screen);
@@ -39,6 +81,14 @@ function goBack() {
   while (prev && TRANSIENT.has(prev)) prev = state.history.pop();
   if (prev) { state.screen = prev; render(); }
 }
+
+function pushTrace(label) { state.trace.push({ ok: true, label }); }
+function declineNow(reason, retryTarget) {
+  state.trace.push({ ok: false, label: reason });
+  state.retryTarget = retryTarget;
+  goto('outcome-decline', { replace: true });
+}
+function finalizeOutcome() { goto('outcome-clear', { replace: true }); }
 
 // ---- toast ---------------------------------------------------------------
 function showToast(message) {
@@ -56,59 +106,77 @@ function showToast(message) {
 // ---- demo panel (reviewer tool, not part of the customer product) ----
 function renderDemoPanel() {
   const panel = document.getElementById('demo-panel');
+  const T = state.toggles;
+  const rows = [
+    ['selfOwnedMatch', 'Property record matches (self-owned)'],
+    ['landlordConfirmed', 'Landlord confirms tenancy'],
+    ['captureOk', 'Live capture succeeds'],
+    ['gstinPanValid', 'GSTIN + business PAN valid'],
+    ['epfoAvailable', 'EPFO record available'],
+  ];
   panel.innerHTML = `
-    <div class="dt">Demo scenario (reviewer only)</div>
-    <select id="scenario-select">
-      ${Object.entries(DEMO_SCENARIOS).map(([k, s]) =>
-        `<option value="${k}" ${k === state.scenarioKey ? 'selected' : ''}>${s.label}</option>`).join('')}
-    </select>
-    <div class="exp">Expected result: ${scenario().expect}</div>
+    <div class="dt">Background checks (reviewer only)</div>
+    ${rows.map(([key, label]) => `
+      <label class="dtoggle"><input type="checkbox" id="tg-${key}" ${T[key] ? 'checked' : ''}> ${label}</label>
+    `).join('')}
+    <button class="demo-restart" id="demo-restart">Restart flow</button>
   `;
-  document.getElementById('scenario-select').addEventListener('change', (e) => {
-    state.scenarioKey = e.target.value;
-    resetFlow();
+  rows.forEach(([key]) => {
+    document.getElementById(`tg-${key}`).addEventListener('change', (e) => { state.toggles[key] = e.target.checked; });
   });
+  document.getElementById('demo-restart').addEventListener('click', resetFlow);
 }
 
 function resetFlow() {
   clearInterval(state.resendTimer);
+  const toggles = state.toggles;
   Object.assign(state, {
-    screen: 'welcome', history: [],
+    screen: 'welcome', history: [], toggles,
+    loanAmount: '', tier: null,
     aadhaarNumber: '', aadhaarOtp: '', aadhaarVerifying: false, resendIn: 0, resendTimer: null,
-    setupType: null,
+    persona: null, hasGst: null,
     personalEmail: { value: '', otpSent: false, otp: '', verifying: false, verified: false },
     workEmail: { value: '', otpSent: false, otp: '', verifying: false, verified: false },
-    pan: '',
-    currentSameAsPermanent: scenario().currentSameAsPermanentDefault,
-    currentAddressDraft: scenario().currentAddressSuggestion,
-    editingPermanent: false, permanentAddressDraft: '', permanentAddressOverride: null,
-    geoLoading: false, geoConfirmed: false,
-    captureVerdict: null, captureRouteDecision: null, traceOpen: false,
+    pan: '', cibilScore: null,
+    incomeAccount: null,
+    homeSameAsAadhaar: null,
+    homePincode: '', homeCity: '', homeState: '', homeAddressLine: '',
+    homeOwnership: null,
+    officeAddress: '', officeValidating: false, officeValidated: false, officeError: '',
+    businessChoice: null, businessGstinInput: '', businessPanInput: '',
+    captureContext: null, geoLoading: false, geoConfirmed: false,
+    trace: [], retryTarget: null, traceOpen: false,
   });
   render();
 }
 
 // ---- topbar (back + progress) ------------------------------------------
-const STAGE_OF = {
+const STAGE_LABELS = ['', 'Identity', 'CIBIL & income', 'Home address', 'Office & business', 'Done'];
+const STATIC_STAGE_OF = {
   welcome: 0,
-  'aadhaar-number': 1, 'aadhaar-otp': 1,
-  setup: 2, 'business-stub': 2,
-  'email-verify': 2, pan: 2, 'bureau-loading': 2, profile: 2,
-  'capture-intro': 3, 'capture-geo': 3, 'capture-camera': 3, 'capture-checking': 3,
-  'outcome-clear': 4, 'outcome-decline': 4, 'support-stub': 4,
+  'loan-amount': 1, 'aadhaar-number': 1, 'aadhaar-otp': 1, persona: 1, 'gst-check': 1, 'email-verify': 1,
+  pan: 2, 'bureau-checking': 2, offer: 2, 'income-account': 2, 'income-docs-checking': 2,
+  'home-same': 3, 'home-pincode': 3, 'home-ownership': 3, 'home-checking': 3,
+  'office-address': 4, 'business-address': 4, 'business-documents': 4,
+  'outcome-clear': 5, 'outcome-decline': 5, 'support-stub': 5, 'resume-stub': 5,
 };
-const STAGE_LABELS = ['', 'Identity check', 'Details', 'Verification', 'Done'];
-const NO_BACK = new Set(['welcome', 'bureau-loading', 'capture-checking', 'outcome-clear', 'outcome-decline']);
+const CAPTURE_STAGE = { selfie: 1, home: 3, office: 4, business: 4 };
+const NO_BACK = new Set(['welcome', 'bureau-checking', 'home-checking', 'income-docs-checking', 'capture-checking', 'outcome-clear', 'outcome-decline']);
+
+function currentStage() {
+  if (state.screen.startsWith('capture-')) return CAPTURE_STAGE[state.captureContext] ?? 1;
+  return STATIC_STAGE_OF[state.screen] ?? 0;
+}
 
 function renderTopbar() {
-  const stage = STAGE_OF[state.screen] ?? 0;
+  const stage = currentStage();
   const canBack = !NO_BACK.has(state.screen) && state.history.length > 0;
   topbarEl.innerHTML = `
     ${canBack ? `<button class="back-btn" id="back-btn" aria-label="Back">${ICONS.chevronLeft}</button>` : (stage > 0 ? '<span class="back-spacer"></span>' : '')}
     ${stage > 0 ? `
       <div class="progress-wrap">
         <div class="progress-track">
-          ${[1, 2, 3, 4].map((i) => `<div class="progress-seg ${i <= stage ? 'done' : ''}"><span class="fill"></span></div>`).join('')}
+          ${[1, 2, 3, 4, 5].map((i) => `<div class="progress-seg ${i <= stage ? 'done' : ''}"><span class="fill"></span></div>`).join('')}
         </div>
         <div class="progress-label">${STAGE_LABELS[stage]}</div>
       </div>` : ''}
@@ -140,10 +208,9 @@ function formatAadhaar(raw) {
 
 // Ticks a resend countdown by mutating the button directly. Deliberately
 // never calls render(): this runs on a 1s interval for as long as an OTP
-// screen is open, and a full re-render on that cadence was recreating the
-// OTP input mid-keystroke, which is why "type a digit, losing focus" kept
-// happening. Never call render() from a timer that can fire while an
-// input on screen might have focus.
+// screen is open, and a full re-render on that cadence recreates the OTP
+// input mid-keystroke. Never call render() from a timer that can fire
+// while an input on screen might have focus.
 function startResendTimer(btnId) {
   clearInterval(state.resendTimer);
   state.resendIn = 30;
@@ -236,10 +303,26 @@ const screens = {
     return `
       <div class="center" style="margin:auto 0;">
         <div class="hero-icon">${ICONS.home}</div>
-        <h1 class="screen-title">Let's verify where you live or work</h1>
-        <p class="screen-sub">Most people finish in a few minutes, right from your phone. No paperwork, no one visiting your door until the live check at the end.</p>
+        <h1 class="screen-title">Let's get your loan verified</h1>
+        <p class="screen-sub">A few quick steps, right from your phone. What we ask for depends on your loan amount and how you earn, nothing more than we need.</p>
       </div>
-      <div class="btn-row"><button class="btn btn-primary" data-go="aadhaar-number">Get started</button></div>
+      <div class="btn-row"><button class="btn btn-primary" data-go="loan-amount">Get started</button></div>
+    `;
+  },
+
+  'loan-amount'() {
+    const chips = [100000, 300000, 500000, 1000000];
+    return `
+      <span class="eyebrow">${ICONS.bank} Loan details</span>
+      <h1 class="screen-title">How much would you like to borrow?</h1>
+      <p class="screen-sub">This decides which checks apply. Larger loans include one extra live check for your address.</p>
+      <label for="loan-amount-input">Loan amount</label>
+      <input id="loan-amount-input" type="text" inputmode="numeric" placeholder="e.g. 500000" value="${state.loanAmount}">
+      <div class="chip-row">
+        ${chips.map((c) => `<button type="button" class="chip" data-amount="${c}">₹${c / 100000}L</button>`).join('')}
+      </div>
+      <div class="value-nudge">${ICONS.info} Loans of ₹5,00,000 or more include one extra live check for your address.</div>
+      <div class="btn-row"><button class="btn btn-primary" id="continue-loan-amount" ${Number(state.loanAmount) > 0 ? '' : 'disabled'}>Continue</button></div>
     `;
   },
 
@@ -256,11 +339,10 @@ const screens = {
   },
 
   'aadhaar-otp'() {
-    const last4 = scenario().profile.linkedMobileLast4;
     return `
       <span class="eyebrow">${ICONS.idcard} Verify code</span>
       <h1 class="screen-title">Enter the code we sent</h1>
-      <p class="screen-sub">Sent to your Aadhaar-registered mobile number, ending in ${last4}. <span class="mono">(Demo, any 6 digits work)</span></p>
+      <p class="screen-sub">Sent to your Aadhaar-registered mobile number, ending in ${PROFILE.linkedMobileLast4}. <span class="mono">(Demo, any 6 digits work)</span></p>
       <input id="aadhaar-otp-input" class="otp-input" type="text" inputmode="numeric" maxlength="6" placeholder="······" value="${state.aadhaarOtp}">
       <div class="btn-row">
         <button class="btn btn-primary" id="verify-aadhaar-otp" ${state.aadhaarOtp.length === 6 ? '' : 'disabled'}>${state.aadhaarVerifying ? '<span class="spin"></span>' : 'Verify'}</button>
@@ -269,115 +351,23 @@ const screens = {
     `;
   },
 
-  setup() {
-    const options = [
-      { id: 'employed', t: 'Employed', s: 'Salaried, whether from an office or remote' },
-      { id: 'shop', t: 'Shop / store owner', s: 'I run a retail shop or business outlet' },
-      { id: 'selfemployed', t: 'Self-employed, no storefront', s: 'Freelancer, consultant, or home-based practice' },
-    ];
-    return `
-      <span class="eyebrow">${ICONS.home} Setup</span>
-      <h1 class="screen-title">What best describes your work?</h1>
-      <p class="screen-sub">This decides what we ask for next, nothing more than we need.</p>
-      ${options.map((o) => `
-        <div class="radio-card ${state.setupType === o.id ? 'selected' : ''}" data-setup="${o.id}">
-          <div class="dot"></div>
-          <div><div class="rt">${o.t}</div><div class="rs">${o.s}</div></div>
-        </div>`).join('')}
-      <div class="btn-row"><button class="btn btn-primary" id="continue-setup" ${state.setupType ? '' : 'disabled'}>Continue</button></div>
-    `;
-  },
-
-  'business-stub'() {
-    return `
-      <div class="center" style="margin:auto 0;">
-        <div class="hero-icon">${ICONS.clock}</div>
-        <h1 class="screen-title">Almost there for shop owners</h1>
-        <p class="screen-sub">Business verification isn't live in this preview yet. We're finishing it next. Try Employed or Self-employed to see the full journey.</p>
-      </div>
-      <div class="btn-row"><button class="btn btn-secondary" data-go="setup">← Choose a different option</button></div>
-    `;
-  },
-
-  'email-verify'() {
-    const needsWork = state.setupType === 'employed';
-    return `
-      <span class="eyebrow">${ICONS.mail} Contact details</span>
-      <h1 class="screen-title">Verify your email${needsWork ? 's' : ''}</h1>
-      <p class="screen-sub">${needsWork ? "Your personal email is where we send statements. Your office email gives us a second way to reach you if we can't reach you at home." : "We'll use this for statements and account updates."}</p>
-      ${emailBlock('personalEmail', 'Personal email', 'you@example.com')}
-      ${needsWork ? emailBlock('workEmail', 'Office email', 'you@company.com') : ''}
-      <div class="btn-row"><button class="btn btn-primary" id="continue-emails" ${state.personalEmail.verified && (!needsWork || state.workEmail.verified) ? '' : 'disabled'}>Continue</button></div>
-    `;
-  },
-
-  pan() {
-    return `
-      <span class="eyebrow">${ICONS.bank} Eligibility check</span>
-      <h1 class="screen-title">Let's see what you're eligible for</h1>
-      <p class="screen-sub">Enter your PAN. This is a soft check and never affects your credit score.</p>
-      <input id="pan-input" type="text" placeholder="ABCDE1234F" maxlength="10" style="text-transform:uppercase" value="${state.pan}">
-      <div class="btn-row"><button class="btn btn-primary" id="pull-bureau" ${state.pan.length === 10 ? '' : 'disabled'}>Check my offer</button></div>
-    `;
-  },
-
-  'bureau-loading'() {
-    return `
-      <div class="loading-wrap">
-        <div class="ring"><svg viewBox="0 0 54 54"><circle class="track" cx="27" cy="27" r="24"/><circle class="head" cx="27" cy="27" r="24"/></svg></div>
-        <p class="loading-text">Looking up your details…</p>
-      </div>
-    `;
-  },
-
-  profile() {
-    const p = scenario().profile;
-    if (state.editingPermanent) {
-      return `
-        <span class="eyebrow">${ICONS.idcard} Your details</span>
-        <h1 class="screen-title">Update your permanent address</h1>
-        <p class="screen-sub">We'll use this instead of the one from Aadhaar.</p>
-        <div class="inline-edit"><input id="permanent-draft-input" type="text" value="${state.permanentAddressDraft}"></div>
-        <div class="btn-row"><button class="btn btn-primary" id="save-permanent">Save</button><button class="link-btn muted" id="cancel-permanent">Cancel</button></div>
-      `;
-    }
-    return `
-      <span class="eyebrow">${ICONS.idcard} Your details</span>
-      <h1 class="screen-title">Good news, we found your details</h1>
-      <p class="screen-sub">Pulled securely from Aadhaar and your credit record. No documents to upload.</p>
-      <div class="profile-card">
-        <div class="profile-row"><span class="k">Name</span><span class="v">${p.name}</span></div>
-        <div class="profile-row"><span class="k">Date of birth</span><span class="v">${p.dob}</span></div>
-        <div class="profile-row"><span class="k">Permanent address</span><span class="v">${permanentAddress()}</span></div>
-      </div>
-      <div class="check-toggle ${state.currentSameAsPermanent ? 'checked' : ''}" id="same-address-toggle">
-        <div class="box">${ICONS.check}</div>
-        <div><div class="ct">I currently live at my permanent address</div><div class="cs">Uncheck this if you've moved since Aadhaar was last updated.</div></div>
-      </div>
-      ${!state.currentSameAsPermanent ? `
-        <label for="current-address-input">Current address</label>
-        <input id="current-address-input" type="text" value="${state.currentAddressDraft}">
-      ` : ''}
-      <div class="btn-row">
-        <button class="btn btn-primary" data-go="capture-intro">Yes, that's correct</button>
-        <button class="link-btn muted" id="edit-permanent">That's not quite right</button>
-      </div>
-    `;
-  },
-
   'capture-intro'() {
+    const c = CAPTURE_COPY[state.captureContext];
     return `
       <div style="margin-top:6px;">
         <div class="hero-icon">${ICONS.shield}</div>
-        <h1 class="screen-title">Let's confirm your premises</h1>
-        <p class="screen-sub">A verified Aadhaar and email tell us who you are and how to reach you. This last step confirms you're actually at this address right now, it takes about 30 seconds.</p>
+        <h1 class="screen-title">${c.introTitle}</h1>
+        <p class="screen-sub">${c.introBody}</p>
         <div class="reassure-list">
           <div class="reassure-item"><div class="reassure-icon">${ICONS.pin}</div><div class="reassure-text"><div class="rt">Used once</div><div class="rs">We check your location only for this step, nothing is tracked afterward.</div></div></div>
           <div class="reassure-item"><div class="reassure-icon">${ICONS.lock}</div><div class="reassure-text"><div class="rt">Kept secure</div><div class="rs">Your photo is encrypted and used only to verify this application.</div></div></div>
           <div class="reassure-item"><div class="reassure-icon">${ICONS.noVisit}</div><div class="reassure-text"><div class="rt">No one visits</div><div class="rs">This replaces an in-person visit for this step.</div></div></div>
         </div>
       </div>
-      <div class="btn-row"><button class="btn btn-primary" data-go="capture-geo">Continue</button></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="capture-continue">Continue</button>
+        ${c.allowResume ? `<button class="link-btn muted" id="capture-later">Do this later instead</button>` : ''}
+      </div>
     `;
   },
 
@@ -386,7 +376,7 @@ const screens = {
       return `
         <h1 class="screen-title">Location confirmed</h1>
         <div class="geo-card"><div class="gi">${ICONS.pin}</div><div><div class="gt">You're in the right area</div><div class="gs">Confirmed just now, used once for this check</div></div></div>
-        <div class="btn-row"><button class="btn btn-primary" data-go="capture-camera">Continue</button></div>
+        <div class="btn-row"><button class="btn btn-primary" id="geo-continue">Continue</button></div>
       `;
     }
     return `
@@ -398,9 +388,10 @@ const screens = {
   },
 
   'capture-camera'() {
+    const c = CAPTURE_COPY[state.captureContext];
     return `
-      <h1 class="screen-title">Show your door number</h1>
-      <p class="screen-sub">Point your camera at your house number or door plate.</p>
+      <h1 class="screen-title">${c.cameraTitle}</h1>
+      <p class="screen-sub">${c.cameraBody}</p>
       <div class="camera-illustration" id="camera-view">
         <div class="ci-icon">${ICONS.camera}</div>
         <div class="guidance-pill" id="guidance-pill"><span class="guidance-dot"></span><span id="guidance-text">Position it in the frame</span></div>
@@ -419,11 +410,215 @@ const screens = {
     `;
   },
 
+  persona() {
+    const options = [
+      { id: 'salaried', t: 'Salaried', s: 'I work for an employer and get a monthly salary' },
+      { id: 'selfEmployed', t: 'Self Employed', s: 'Freelancer, consultant, or professional practice' },
+      { id: 'businessOwner', t: 'Business Owner', s: 'I run a shop, store, or business outlet' },
+    ];
+    return `
+      <span class="eyebrow">${ICONS.home} About your work</span>
+      <h1 class="screen-title">What best describes you?</h1>
+      <p class="screen-sub">This decides what we ask for next, nothing more than we need.</p>
+      ${options.map((o) => `
+        <div class="radio-card ${state.persona === o.id ? 'selected' : ''}" data-persona="${o.id}">
+          <div class="dot"></div>
+          <div><div class="rt">${o.t}</div><div class="rs">${o.s}</div></div>
+        </div>`).join('')}
+      <div class="btn-row"><button class="btn btn-primary" id="continue-persona" ${state.persona ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  'gst-check'() {
+    return `
+      <span class="eyebrow">${ICONS.doc} About your work</span>
+      <h1 class="screen-title">Do you have a GST registration?</h1>
+      <p class="screen-sub">If your work is registered for GST, we can verify your business address using that registration instead of extra paperwork.</p>
+      <div class="radio-card ${state.hasGst === true ? 'selected' : ''}" data-gst="yes"><div class="dot"></div><div><div class="rt">Yes, I have GST registration</div></div></div>
+      <div class="radio-card ${state.hasGst === false ? 'selected' : ''}" data-gst="no"><div class="dot"></div><div><div class="rt">No, I don't</div></div></div>
+      <div class="btn-row"><button class="btn btn-primary" id="continue-gst" ${state.hasGst === null ? 'disabled' : ''}>Continue</button></div>
+    `;
+  },
+
+  'email-verify'() {
+    const needsWork = state.persona === 'salaried';
+    return `
+      <span class="eyebrow">${ICONS.mail} Contact details</span>
+      <h1 class="screen-title">Verify your email${needsWork ? 's' : ''}</h1>
+      <p class="screen-sub">${needsWork ? "Your personal email is where we send statements. Your office email helps confirm your employer and gives us a second way to reach you." : "We'll use this for statements and account updates."}</p>
+      ${emailBlock('personalEmail', 'Personal email', 'you@example.com')}
+      ${needsWork ? emailBlock('workEmail', 'Office email', 'you@company.com') : ''}
+      <div class="btn-row"><button class="btn btn-primary" id="continue-emails" ${state.personalEmail.verified && (!needsWork || state.workEmail.verified) ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  pan() {
+    return `
+      <span class="eyebrow">${ICONS.bank} Credit check</span>
+      <h1 class="screen-title">Let's check your credit score</h1>
+      <p class="screen-sub">Enter your PAN. This is a soft check and never affects your credit score.</p>
+      <input id="pan-input" type="text" placeholder="ABCDE1234F" maxlength="10" style="text-transform:uppercase" value="${state.pan}">
+      <div class="btn-row"><button class="btn btn-primary" id="pull-bureau" ${state.pan.length === 10 ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  'bureau-checking'() {
+    return `
+      <div style="margin-top:12px;">
+        <h1 class="screen-title">Just a moment</h1>
+        <p class="screen-sub">Checking your credit record.</p>
+        <div id="bureau-check-list"></div>
+      </div>
+    `;
+  },
+
+  offer() {
+    return `
+      <div class="center" style="margin-top:8px;">
+        <div class="hero-icon">${ICONS.chart}</div>
+        <h1 class="screen-title">Good news, here's your score</h1>
+        <p class="screen-sub">Your CIBIL score is <strong>${state.cibilScore}</strong>. Based on this, you're eligible for the amount you asked for.</p>
+      </div>
+      <div class="btn-row"><button class="btn btn-primary" data-go="income-account">Continue</button></div>
+    `;
+  },
+
+  'income-account'() {
+    return `
+      <span class="eyebrow">${ICONS.bank} Income check</span>
+      <h1 class="screen-title">Where does your income settle?</h1>
+      <p class="screen-sub">We found these accounts linked to your PAN. Pick the one your salary or income is paid into each month.</p>
+      ${BANK_ACCOUNTS.map((b) => `
+        <div class="radio-card ${state.incomeAccount === b.id ? 'selected' : ''}" data-account="${b.id}">
+          <div class="dot"></div>
+          <div><div class="rt">${b.label}</div></div>
+        </div>`).join('')}
+      <div class="btn-row"><button class="btn btn-primary" id="continue-income-account" ${state.incomeAccount ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  'income-docs-checking'() {
+    const isBiz = state.persona === 'businessOwner';
+    return `
+      <div style="margin-top:12px;">
+        <h1 class="screen-title">Just a moment</h1>
+        <p class="screen-sub">${isBiz ? 'Fetching your GST returns.' : 'Fetching your income tax returns.'}</p>
+        <div id="income-docs-check-list"></div>
+      </div>
+    `;
+  },
+
+  'home-same'() {
+    return `
+      <span class="eyebrow">${ICONS.home} Home address</span>
+      <h1 class="screen-title">Do you currently live at your Aadhaar address?</h1>
+      <p class="screen-sub">${PROFILE.aadhaarAddress}</p>
+      <div class="radio-card ${state.homeSameAsAadhaar === true ? 'selected' : ''}" data-same="yes"><div class="dot"></div><div><div class="rt">Yes, same address</div></div></div>
+      <div class="radio-card ${state.homeSameAsAadhaar === false ? 'selected' : ''}" data-same="no"><div class="dot"></div><div><div class="rt">No, I live somewhere else now</div></div></div>
+      <div class="btn-row"><button class="btn btn-primary" id="continue-home-same" ${state.homeSameAsAadhaar === null ? 'disabled' : ''}>Continue</button></div>
+    `;
+  },
+
+  'home-pincode'() {
+    const showRest = state.homePincode.replace(/\D/g, '').length === 6;
+    return `
+      <span class="eyebrow">${ICONS.pin} Home address</span>
+      <h1 class="screen-title">What's your current address?</h1>
+      <p class="screen-sub">Start with your pincode, we'll fill in the city and state.</p>
+      <label for="home-pincode-input">Pincode</label>
+      <input id="home-pincode-input" type="text" inputmode="numeric" maxlength="6" placeholder="e.g. 400001" value="${state.homePincode}">
+      ${showRest ? `
+        <div class="value-nudge">${ICONS.pin} ${state.homeCity}, ${state.homeState}</div>
+        <label for="home-address-input">Complete address</label>
+        <textarea id="home-address-input" rows="3" placeholder="House / flat no., street, locality">${state.homeAddressLine}</textarea>
+      ` : ''}
+      <div class="btn-row"><button class="btn btn-primary" id="continue-home-pincode" ${showRest && state.homeAddressLine.trim() ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  'home-ownership'() {
+    const options = [
+      { id: 'self', t: 'Self-owned', s: 'This property is registered in my name' },
+      { id: 'family', t: 'Family-owned', s: 'Owned by my parents or another family member' },
+      { id: 'rented', t: 'Rented', s: "I'm a tenant here" },
+    ];
+    return `
+      <span class="eyebrow">${ICONS.home} Home address</span>
+      <h1 class="screen-title">Is this home owned or rented?</h1>
+      <p class="screen-sub">This decides how we confirm it, no paperwork either way.</p>
+      ${options.map((o) => `
+        <div class="radio-card ${state.homeOwnership === o.id ? 'selected' : ''}" data-ownership="${o.id}">
+          <div class="dot"></div>
+          <div><div class="rt">${o.t}</div><div class="rs">${o.s}</div></div>
+        </div>`).join('')}
+      <div class="btn-row"><button class="btn btn-primary" id="continue-home-ownership" ${state.homeOwnership ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  'home-checking'() {
+    return `
+      <div style="margin-top:12px;">
+        <h1 class="screen-title">Just a moment</h1>
+        <p class="screen-sub">${state.homeOwnership === 'rented' ? 'Confirming your tenancy.' : 'Confirming ownership.'}</p>
+        <div id="home-check-list"></div>
+      </div>
+    `;
+  },
+
+  'office-address'() {
+    return `
+      <span class="eyebrow">${ICONS.bank} Office address</span>
+      <h1 class="screen-title">What's your office address?</h1>
+      <p class="screen-sub">We'll validate this in real time, like checking it on a map.</p>
+      <label for="office-address-input">Office address</label>
+      <textarea id="office-address-input" rows="3" placeholder="Building, street, locality, city">${state.officeAddress}</textarea>
+      ${state.officeError ? `<div class="field-error">${state.officeError}</div>` : ''}
+      ${state.officeValidated ? `
+        <div class="geo-card"><div class="gi">${ICONS.check}</div><div><div class="gt">Address validated</div><div class="gs">Matches a real location on the map</div></div></div>
+        <div class="recovery-card tint-brand">
+          <div class="check-row" style="border:none;padding:6px 0;"><div class="check-icon ${state.toggles.epfoAvailable ? 'ok' : ''}">${state.toggles.epfoAvailable ? ICONS.check : ''}</div><div class="check-name">EPFO record found (bonus)</div></div>
+          <div class="check-row" style="border:none;padding:6px 0;"><div class="check-icon ${state.toggles.epfoAvailable ? 'ok' : ''}">${state.toggles.epfoAvailable ? ICONS.check : ''}</div><div class="check-name">Salary account matches employer (bonus)</div></div>
+        </div>
+      ` : ''}
+      <div class="btn-row">
+        <button class="btn btn-primary" id="${state.officeValidated ? 'continue-office' : 'validate-office'}">${state.officeValidating ? '<span class="spin"></span>' : (state.officeValidated ? 'Continue' : 'Validate address')}</button>
+      </div>
+    `;
+  },
+
+  'business-address'() {
+    return `
+      <span class="eyebrow">${ICONS.shop} Business address</span>
+      <h1 class="screen-title">Let's confirm your business address</h1>
+      <div class="geo-card"><div class="gi">${ICONS.doc}</div><div><div class="gt">${BUSINESS_INFO.legalName}</div><div class="gs">GSTIN ${BUSINESS_INFO.gstin}, found automatically</div></div></div>
+      <p class="screen-sub">Confirm this address with a live photo of your shop, or upload your GSTIN and business PAN instead.</p>
+      <div class="radio-card ${state.businessChoice === 'photo' ? 'selected' : ''}" data-bizchoice="photo">
+        <div class="dot"></div><div><div class="rt">Take a live shop photo</div><div class="rs">Quickest, confirms the address right away</div></div>
+      </div>
+      <div class="radio-card ${state.businessChoice === 'documents' ? 'selected' : ''}" data-bizchoice="documents">
+        <div class="dot"></div><div><div class="rt">Upload GSTIN and business PAN</div><div class="rs">No photo needed</div></div>
+      </div>
+      <div class="btn-row"><button class="btn btn-primary" id="continue-business-choice" ${state.businessChoice ? '' : 'disabled'}>Continue</button></div>
+    `;
+  },
+
+  'business-documents'() {
+    return `
+      <span class="eyebrow">${ICONS.doc} Business documents</span>
+      <h1 class="screen-title">Confirm your business registration</h1>
+      <label for="biz-gstin-input">GSTIN</label>
+      <input id="biz-gstin-input" type="text" placeholder="07ABCDE1234F1Z5" maxlength="15" style="text-transform:uppercase" value="${state.businessGstinInput}">
+      <label for="biz-pan-input">Business PAN</label>
+      <input id="biz-pan-input" type="text" placeholder="ABCDE1234F" maxlength="10" style="text-transform:uppercase" value="${state.businessPanInput}">
+      <div class="btn-row"><button class="btn btn-primary" id="submit-business-docs" ${state.businessGstinInput.length === 15 && state.businessPanInput.length === 10 ? '' : 'disabled'}>Submit</button></div>
+    `;
+  },
+
   'outcome-clear'() {
     return outcomeMarkup({
       tone: 'success',
       headline: "You're verified",
-      sub: 'Your identity, contact details, and live premises check are all confirmed.',
+      sub: 'Your identity, income, and address checks are all confirmed.',
       cta: 'See my loan offer',
       celebrate: true,
     });
@@ -433,9 +628,9 @@ const screens = {
     return outcomeMarkup({
       tone: 'neutral',
       headline: "We couldn't confirm this automatically",
-      sub: "Location or photo signals don't always come through clearly on the first try. You're welcome to try again, or we can help directly.",
+      sub: "That's alright, this happens sometimes. You're welcome to try again, or we can help directly.",
       cta: 'Try again',
-      ctaAction: 'retry-capture',
+      ctaAction: 'retry',
       secondaryCta: 'Contact support',
     });
   },
@@ -450,10 +645,20 @@ const screens = {
       <div class="btn-row"><button class="btn btn-secondary" id="restart">Start over</button></div>
     `;
   },
+
+  'resume-stub'() {
+    return `
+      <div class="center" style="margin:auto 0;">
+        <div class="hero-icon">${ICONS.link}</div>
+        <h1 class="screen-title">We'll save your progress</h1>
+        <p class="screen-sub">In the full product we'd text and email you a secure link to finish this step whenever you're ready. Everything you've done so far stays saved.</p>
+      </div>
+      <div class="btn-row"><button class="btn btn-primary" id="resume-continue-now">Actually, continue now</button></div>
+    `;
+  },
 };
 
 function outcomeMarkup({ tone, headline, sub, cta, celebrate, ctaAction, secondaryCta }) {
-  const trace = buildFullTrace();
   return `
     <div class="outcome-badge ${tone}">
       ${celebrate ? `<div class="confetti" id="confetti"></div>` : ''}
@@ -464,7 +669,7 @@ function outcomeMarkup({ tone, headline, sub, cta, celebrate, ctaAction, seconda
     <button class="trace-toggle ${state.traceOpen ? 'open' : ''}" id="trace-toggle">What we checked ${ICONS.chevronDown}</button>
     <div class="trace-panel ${state.traceOpen ? 'open' : ''}">
       <div class="trace-panel-inner">
-        ${trace.map((t) => `<div class="trace-line ${t.ok ? 'yes' : 'no'}">${t.ok ? ICONS.check : ICONS.x}<span>${t.label}</span></div>`).join('')}
+        ${state.trace.map((t) => `<div class="trace-line ${t.ok ? 'yes' : 'no'}">${t.ok ? ICONS.check : ICONS.x}<span>${t.label}</span></div>`).join('')}
       </div>
     </div>
     <div class="btn-row">
@@ -472,18 +677,6 @@ function outcomeMarkup({ tone, headline, sub, cta, celebrate, ctaAction, seconda
       ${secondaryCta ? `<button class="link-btn muted" id="outcome-secondary">${secondaryCta}</button>` : ''}
     </div>
   `;
-}
-
-function buildFullTrace() {
-  const lines = [
-    { ok: true, label: 'Aadhaar: identity verified' },
-    { ok: true, label: 'Personal email: verified' },
-  ];
-  if (state.setupType === 'employed') lines.push({ ok: true, label: 'Office email: verified' });
-  if (state.captureVerdict) {
-    lines.push({ ok: state.captureVerdict.ok, label: state.captureVerdict.ok ? 'Live capture: confirmed genuine and live at this address' : 'Live capture: could not confirm this was a genuine, live submission' });
-  }
-  return lines;
 }
 
 // ---- render dispatcher --------------------------------------------------
@@ -497,6 +690,21 @@ function render() {
 // ---- event wiring per screen ---------------------------------------------
 function wireEvents() {
   root.querySelectorAll('[data-go]').forEach((el) => el.addEventListener('click', () => goto(el.dataset.go)));
+
+  if (state.screen === 'loan-amount') {
+    bindInput('loan-amount-input', {
+      transform: (v) => v.replace(/\D/g, ''),
+      onChange: (v) => { state.loanAmount = v; },
+      buttonId: 'continue-loan-amount', isValid: (v) => Number(v) > 0,
+    });
+    root.querySelectorAll('[data-amount]').forEach((el) => el.addEventListener('click', () => {
+      state.loanAmount = el.dataset.amount; render();
+    }));
+    document.getElementById('continue-loan-amount')?.addEventListener('click', () => {
+      state.tier = loanTier(Number(state.loanAmount));
+      goto('aadhaar-number');
+    });
+  }
 
   if (state.screen === 'aadhaar-number') {
     bindInput('aadhaar-input', {
@@ -520,18 +728,46 @@ function wireEvents() {
     document.getElementById('resend-aadhaar-otp')?.addEventListener('click', () => startResendTimer('resend-aadhaar-otp'));
   }
 
-  if (state.screen === 'setup') {
-    root.querySelectorAll('[data-setup]').forEach((el) => el.addEventListener('click', () => { state.setupType = el.dataset.setup; render(); }));
-    document.getElementById('continue-setup')?.addEventListener('click', () => {
-      if (state.setupType === 'shop') goto('business-stub');
-      else goto('email-verify');
+  if (state.screen === 'capture-intro') {
+    document.getElementById('capture-continue')?.addEventListener('click', () => {
+      goto(needsGeo(state.captureContext) ? 'capture-geo' : 'capture-camera');
     });
+    document.getElementById('capture-later')?.addEventListener('click', () => goto('resume-stub'));
+  }
+  if (state.screen === 'capture-geo') {
+    document.getElementById('capture-geo-btn')?.addEventListener('click', async () => {
+      state.geoLoading = true; render();
+      await sleep(800);
+      state.geoLoading = false; state.geoConfirmed = true; render();
+    });
+    document.getElementById('geo-continue')?.addEventListener('click', () => {
+      state.geoConfirmed = false;
+      goto('capture-camera');
+    });
+  }
+  if (state.screen === 'capture-camera') runCameraGuidance();
+  if (state.screen === 'capture-checking') runCaptureCheck();
+
+  if (state.screen === 'persona') {
+    root.querySelectorAll('[data-persona]').forEach((el) => el.addEventListener('click', () => { state.persona = el.dataset.persona; render(); }));
+    document.getElementById('continue-persona')?.addEventListener('click', () => {
+      goto(state.persona === 'selfEmployed' ? 'gst-check' : 'email-verify');
+    });
+  }
+
+  if (state.screen === 'gst-check') {
+    root.querySelectorAll('[data-gst]').forEach((el) => el.addEventListener('click', () => { state.hasGst = el.dataset.gst === 'yes'; render(); }));
+    document.getElementById('continue-gst')?.addEventListener('click', () => goto('email-verify'));
   }
 
   if (state.screen === 'email-verify') {
     wireEmailBlock('personalEmail');
-    if (state.setupType === 'employed') wireEmailBlock('workEmail');
-    document.getElementById('continue-emails')?.addEventListener('click', () => goto('pan'));
+    if (state.persona === 'salaried') wireEmailBlock('workEmail');
+    document.getElementById('continue-emails')?.addEventListener('click', () => {
+      pushTrace('Personal email verified');
+      if (state.persona === 'salaried') pushTrace('Office email verified');
+      goto('pan');
+    });
   }
 
   if (state.screen === 'pan') {
@@ -540,53 +776,128 @@ function wireEvents() {
       onChange: (v) => { state.pan = v; },
       buttonId: 'pull-bureau', isValid: (v) => v.length === 10,
     });
-    document.getElementById('pull-bureau')?.addEventListener('click', async () => {
-      goto('bureau-loading', { replace: true });
-      await sleep(BUREAU_LATENCY_MS);
-      goto('profile', { replace: true });
+    document.getElementById('pull-bureau')?.addEventListener('click', () => goto('bureau-checking'));
+  }
+
+  if (state.screen === 'bureau-checking') runBureauCheck();
+
+  if (state.screen === 'income-account') {
+    root.querySelectorAll('[data-account]').forEach((el) => el.addEventListener('click', () => { state.incomeAccount = el.dataset.account; render(); }));
+    document.getElementById('continue-income-account')?.addEventListener('click', () => {
+      const acc = BANK_ACCOUNTS.find((b) => b.id === state.incomeAccount);
+      pushTrace(`Income account on file: ${acc.label}`);
+      const needsDocs = state.persona === 'businessOwner' || state.persona === 'selfEmployed';
+      goto(needsDocs ? 'income-docs-checking' : 'home-same');
     });
   }
 
-  if (state.screen === 'profile') {
-    document.getElementById('same-address-toggle')?.addEventListener('click', () => {
-      state.currentSameAsPermanent = !state.currentSameAsPermanent;
+  if (state.screen === 'income-docs-checking') runIncomeDocsCheck();
+
+  if (state.screen === 'home-same') {
+    root.querySelectorAll('[data-same]').forEach((el) => el.addEventListener('click', () => { state.homeSameAsAadhaar = el.dataset.same === 'yes'; render(); }));
+    document.getElementById('continue-home-same')?.addEventListener('click', () => {
+      if (state.homeSameAsAadhaar) {
+        state.homeAddressLine = PROFILE.aadhaarAddress;
+        goto('home-ownership');
+      } else {
+        goto('home-pincode');
+      }
+    });
+  }
+
+  if (state.screen === 'home-pincode') {
+    bindInput('home-pincode-input', {
+      transform: (v) => v.replace(/\D/g, '').slice(0, 6),
+      onChange: (v) => {
+        state.homePincode = v;
+        if (v.length === 6) {
+          const loc = lookupPincode(v);
+          state.homeCity = loc.city; state.homeState = loc.state;
+          render();
+        }
+      },
+    });
+    bindInput('home-address-input', {
+      onChange: (v) => { state.homeAddressLine = v; },
+      buttonId: 'continue-home-pincode', isValid: (v) => v.trim().length > 0,
+    });
+    document.getElementById('continue-home-pincode')?.addEventListener('click', () => goto('home-ownership'));
+  }
+
+  if (state.screen === 'home-ownership') {
+    root.querySelectorAll('[data-ownership]').forEach((el) => el.addEventListener('click', () => { state.homeOwnership = el.dataset.ownership; render(); }));
+    document.getElementById('continue-home-ownership')?.addEventListener('click', () => goto('home-checking'));
+  }
+
+  if (state.screen === 'home-checking') runHomeCheck();
+
+  if (state.screen === 'office-address') {
+    bindInput('office-address-input', { onChange: (v) => { state.officeAddress = v; state.officeValidated = false; } });
+    document.getElementById('validate-office')?.addEventListener('click', async () => {
+      state.officeValidating = true; state.officeError = ''; render();
+      await sleep(700);
+      state.officeValidating = false;
+      if (state.officeAddress.trim().length >= 8) {
+        state.officeValidated = true;
+        pushTrace('Office address validated');
+        if (state.toggles.epfoAvailable) pushTrace('EPFO record and salary account match employer (bonus)');
+      } else {
+        state.officeError = "We couldn't locate this address. Please add more detail (building, street, locality) and try again.";
+      }
       render();
     });
-    bindInput('current-address-input', { onChange: (v) => { state.currentAddressDraft = v; } });
-    document.getElementById('edit-permanent')?.addEventListener('click', () => {
-      state.editingPermanent = true; state.permanentAddressDraft = permanentAddress(); render();
-    });
-    document.getElementById('cancel-permanent')?.addEventListener('click', () => { state.editingPermanent = false; render(); });
-    document.getElementById('save-permanent')?.addEventListener('click', () => {
-      const v = document.getElementById('permanent-draft-input').value.trim();
-      if (v) state.permanentAddressOverride = v;
-      state.editingPermanent = false; render();
-    });
-    bindInput('permanent-draft-input', { onChange: (v) => { state.permanentAddressDraft = v; } });
-  }
-
-  if (state.screen === 'capture-checking') runCaptureCheck();
-
-  if (state.screen === 'capture-geo') {
-    document.getElementById('capture-geo-btn')?.addEventListener('click', async () => {
-      state.geoLoading = true; render();
-      await sleep(800);
-      state.geoLoading = false; state.geoConfirmed = true; render();
+    document.getElementById('continue-office')?.addEventListener('click', () => {
+      if (state.tier === 'large') { state.captureContext = 'office'; goto('capture-intro'); }
+      else finalizeOutcome();
     });
   }
-  if (state.screen === 'capture-camera') runCameraGuidance();
+
+  if (state.screen === 'business-address') {
+    root.querySelectorAll('[data-bizchoice]').forEach((el) => el.addEventListener('click', () => { state.businessChoice = el.dataset.bizchoice; render(); }));
+    document.getElementById('continue-business-choice')?.addEventListener('click', () => {
+      pushTrace(`Business found: ${BUSINESS_INFO.legalName} (GSTIN ${BUSINESS_INFO.gstin})`);
+      if (state.businessChoice === 'photo') { state.captureContext = 'business'; goto('capture-intro'); }
+      else goto('business-documents');
+    });
+  }
+
+  if (state.screen === 'business-documents') {
+    const isValid = () => state.businessGstinInput.length === 15 && state.businessPanInput.length === 10;
+    bindInput('biz-gstin-input', {
+      transform: (v) => v.toUpperCase().slice(0, 15),
+      onChange: (v) => { state.businessGstinInput = v; },
+      buttonId: 'submit-business-docs', isValid,
+    });
+    bindInput('biz-pan-input', {
+      transform: (v) => v.toUpperCase().slice(0, 10),
+      onChange: (v) => { state.businessPanInput = v; },
+      buttonId: 'submit-business-docs', isValid,
+    });
+    document.getElementById('submit-business-docs')?.addEventListener('click', () => {
+      const result = checkBusinessDocuments(state.toggles.gstinPanValid);
+      if (result.ok) { pushTrace(result.reason); finalizeOutcome(); }
+      else declineNow(result.reason, 'business-documents');
+    });
+  }
 
   if (['outcome-clear', 'outcome-decline'].includes(state.screen)) {
     if (state.screen === 'outcome-clear') fireConfetti();
     document.getElementById('trace-toggle')?.addEventListener('click', () => { state.traceOpen = !state.traceOpen; render(); });
     document.getElementById('outcome-cta')?.addEventListener('click', (e) => {
       const action = e.currentTarget.dataset.action;
-      if (action === 'retry-capture') { state.geoConfirmed = false; goto('capture-geo'); }
-      else resetFlow();
+      if (action === 'retry' && state.retryTarget) {
+        state.trace = state.trace.filter((t) => t.ok);
+        goto(state.retryTarget);
+      } else resetFlow();
     });
     document.getElementById('outcome-secondary')?.addEventListener('click', () => goto('support-stub'));
   }
   if (state.screen === 'support-stub') document.getElementById('restart')?.addEventListener('click', resetFlow);
+  if (state.screen === 'resume-stub') {
+    document.getElementById('resume-continue-now')?.addEventListener('click', () => {
+      goto(needsGeo(state.captureContext) ? 'capture-geo' : 'capture-camera');
+    });
+  }
 }
 
 async function verifyAadhaarOtp() {
@@ -595,8 +906,10 @@ async function verifyAadhaarOtp() {
   await sleep(450);
   state.aadhaarVerifying = false;
   clearInterval(state.resendTimer);
-  goto('setup');
+  pushTrace('Aadhaar identity verified');
   showToast('Aadhaar and mobile verified successfully');
+  if (state.tier === 'large') { state.captureContext = 'selfie'; goto('capture-intro'); }
+  else goto('persona');
 }
 
 // ---- async flows ----------------------------------------------------------
@@ -610,23 +923,13 @@ async function runCameraGuidance() {
   pill.classList.add('ready');
   pillText.textContent = 'Looks good';
   btn.disabled = false;
-  btn.addEventListener('click', () => {
-    goto('capture-checking');
-  }, { once: true });
+  btn.addEventListener('click', () => goto('capture-checking'), { once: true });
 }
 
-async function runCaptureCheck() {
-  const s = scenario();
-  const ok = (s.capture || { ok: true }).ok;
-  const steps = [
-    { name: 'Confirming this is a live, genuine photo', ok },
-    { name: 'Matching your location', ok },
-    { name: 'Reading your door number', ok },
-  ];
-  const list = document.getElementById('capture-check-list');
-  const rows = steps.map((s2, i) => ({ ...s2, done: false, delay: i * 90 }));
+async function animateChecklist(listEl, steps) {
+  const rows = steps.map((s, i) => ({ ...s, done: false, delay: i * 90 }));
   const draw = () => {
-    list.innerHTML = rows.map((r) => `
+    listEl.innerHTML = rows.map((r) => `
       <div class="check-row" style="animation-delay:${r.delay}ms">
         <div class="check-icon ${r.done ? 'ok' : ''}">${r.done ? ICONS.check : ''}</div>
         <div class="check-name">${r.name}</div>
@@ -634,11 +937,69 @@ async function runCaptureCheck() {
   };
   draw();
   for (const row of rows) { await sleep(550); row.done = true; draw(); }
-  await sleep(350);
+  await sleep(300);
+}
 
-  state.captureVerdict = { ok };
-  state.captureRouteDecision = routeFromCapture({ geofenceOk: ok, ocrLivenessOk: ok, mockLocationFlag: !ok });
-  goto(state.captureRouteDecision.lane === 'clear' ? 'outcome-clear' : 'outcome-decline', { replace: true });
+async function runCaptureCheck() {
+  const ctx = state.captureContext;
+  const ok = state.toggles.captureOk;
+  const steps = ctx === 'selfie'
+    ? [{ name: 'Confirming this is a live, genuine selfie', ok }, { name: 'Matching your face to your Aadhaar photo', ok }]
+    : [{ name: 'Confirming this is a live, genuine photo', ok }, { name: 'Matching your location', ok }, { name: 'Reading the signage or number', ok }];
+  await animateChecklist(document.getElementById('capture-check-list'), steps);
+  if (ok) {
+    pushTrace(CAPTURE_COPY[ctx].successLabel);
+    afterCaptureCleared();
+  } else {
+    declineNow(CAPTURE_COPY[ctx].failReason, needsGeo(ctx) ? 'capture-geo' : 'capture-camera');
+  }
+}
+
+function afterCaptureCleared() {
+  if (state.captureContext === 'selfie') { goto('persona', { replace: true }); return; }
+  if (state.captureContext === 'home') { afterHomeCleared(); return; }
+  finalizeOutcome();
+}
+
+async function runBureauCheck() {
+  const steps = [{ name: 'Checking your credit score', ok: true }, { name: 'Confirming your PAN details', ok: true }];
+  await animateChecklist(document.getElementById('bureau-check-list'), steps);
+  state.cibilScore = 762;
+  pushTrace(`CIBIL score checked (${state.cibilScore})`);
+  goto('offer', { replace: true });
+}
+
+async function runIncomeDocsCheck() {
+  const isBiz = state.persona === 'businessOwner';
+  const steps = [{ name: isBiz ? 'Fetching your GST returns' : 'Fetching your income tax returns', ok: true }];
+  await animateChecklist(document.getElementById('income-docs-check-list'), steps);
+  pushTrace(isBiz ? 'GST returns fetched' : 'Income tax returns fetched');
+  goto('home-same', { replace: true });
+}
+
+async function runHomeCheck() {
+  const ownership = state.homeOwnership;
+  let steps;
+  if (ownership === 'self') steps = [{ name: 'Checking government property records', ok: true }];
+  else if (ownership === 'family') steps = [{ name: 'Confirming family ownership', ok: true }];
+  else steps = [{ name: 'Sending your landlord a confirmation link', ok: true }, { name: 'Waiting for landlord response', ok: state.toggles.landlordConfirmed }];
+  await animateChecklist(document.getElementById('home-check-list'), steps);
+
+  const result = checkHomeRecords({
+    ownership,
+    selfOwnedMatch: state.toggles.selfOwnedMatch,
+    landlordConfirmed: state.toggles.landlordConfirmed,
+  });
+  if (!result.ok) { declineNow(result.reason, 'home-ownership'); return; }
+  pushTrace(result.reason);
+  if (state.tier === 'large') { state.captureContext = 'home'; goto('capture-intro', { replace: true }); }
+  else afterHomeCleared();
+}
+
+function afterHomeCleared() {
+  if (state.persona === 'salaried') { goto('office-address', { replace: true }); return; }
+  if (state.persona === 'businessOwner' || (state.persona === 'selfEmployed' && state.hasGst)) { goto('business-address', { replace: true }); return; }
+  finalizeOutcome();
 }
 
 function fireConfetti() {
@@ -657,6 +1018,4 @@ function fireConfetti() {
 }
 
 // ---- boot ----------------------------------------------------------------
-state.currentSameAsPermanent = scenario().currentSameAsPermanentDefault;
-state.currentAddressDraft = scenario().currentAddressSuggestion;
 render();
